@@ -1,0 +1,281 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% A template for Wiley article submissions to Networks.
+% Developed by Overleaf.
+%
+% Modified by D. Shier  (9 September 2021)
+%%
+% Usage notes:
+% % Use "num-refs" option for numerical citation and references style.
+% % Use the attached wiley-networks.cls and abbrv_networks.bst files.
+
+\documentclass[num-refs]{wiley-networks}
+\usepackage{booktabs}
+\usepackage{longtable}
+%\usepackage{algorithm}
+%\usepackage{algpseudocode}
+\usepackage[linesnumbered]{algorithm2e}
+\makeatletter
+\renewcommand{\@algocf@capt@plain}{above}% formerly {bottom}
+\makeatother
+%\usepackage{algorithmic}
+%\allowdisplaybreaks
+% Add additional packages here if required
+
+
+% Update article type if known
+\papertype{Original Article}
+\paperfield{Networks} 
+
+\title{A bilevel location-routing and market share capture of fixed autonomous lockers for the last-mile problem}
+
+% Use the \authfn to add symbols for additional footnotes and present addresses, if any. Usually start with 1 for notes about author contributions; then continuing with 2 etc if any author has a different present address.
+
+%\author[3\authfn{3}]{Ricardo Camargo}
+\author[3]{Ricardo Camargo}
+
+\contrib[\authfn{1}]{Equally contributing authors.}
+
+
+% Include full affiliation details for all authors
+\affil[3]{Departamento de Engenharia de Produção, Universidade Federal de Minas Gerais, Belo Horizonte, MG, Brazil}
+
+\corraddress{Author One, Department, Institution, City, State or Province, Postal Code, Country}
+\corremail{correspondingauthor@email.com}
+
+%\presentadd[\authfn{2}]{Department, Institution, City, State or Province, Postal Code, Country}
+
+%\fundinginfo{Funder One, Funder One Department, Grant/Award Numbers: 123456 and 123458; Funder Two, Funder Two Department, Grant/Award Number: 123459}
+
+% Include the name of the author that should appear in the running header
+\runningauthor{Author One et al.}
+
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+%This article studies the problem of transport of discrete items through multiple transportation modes, such as air freight, truck, and drone delivery systems. We establish theoretical bounds on the mean elapsed shipment time as well as the associate standard deviations. Empirical studies complement this contribution and show the effectiveness of the developed heuristic in closely approximating the true parameter values.
+
+
+% Please include a minimum of six keywords
+\keywords{keyword 1, keyword 2, keyword 3, keyword 4, keyword 5, keyword 6, keyword 7}
+\end{abstract}
+
+\section{Introduction}
+%Please lay out your article using the section headings and example objects below, and remember to delete all help text prior to submitting your article to the journal.
+\small
+\iff
+\begin{table}[!h]
+  \centering
+  \caption{\label{tab:pars} List of sets and parameters} 
+  \begin{threeparttable}
+  \begin{tabular}{cp{10cm}}
+  \hline
+    \thead{Parameters} & \thead{Definition} \\ \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+    $I$ & Set of customer locations to be served.\\
+    $J$ & Set of candidate locations either to locate a fixed locker unit or to act as a stop location for a mobile locker unit, $I \cap J = \emptyset$. \\
+    $N$ & $N = \{\delta\} \cup J \cup \{\bar{\delta}\}$, where $\delta$ and
+    $\bar{\delta}$ is the central depot of the mobile unit and its copy, respectively.\\
+    $C$ & Set of competitors. \\
+    $A$ & Set of arcs or $A=\{(i,j) \in N \times N: i \neq j\}$ \\
+    $\rho$ & Number of fixed autonomous locker units to locate.\\
+    $n$ &number of available mobile locker units. \\
+    $A_j$ & Attractiveness of location $j \in J$ \\
+    $d_{ij}$ & Distance or time for a customer to go from location  $i \in I$ to location $j \in J$.\\
+    $\ell_{ij}$ & Travel time of arc $(i,j) \in A$.\\
+    $\alpha$ & Weight factor for distance criteria.\\
+    $u_{ij}$ & Utility of a fixed locker unit located at location $j\in J$ for customer location $i \in I$, $u_{ij} =  \frac{A_j}{d_{ij}^\alpha}$, or of a mobile locker unit stopped at location $j\in J$ for a time period of $t_{j} \geq 0$ for customer location $i \in I$, $u_{ij} =  \frac{t_j}{d_{ij}^\alpha}$.\\
+    $\check{u}_{ic}$ & Utility of competitor's locker $c\in C$ for customer location $i\in I$. \\
+    $\mu_{i}$ & Total utility of the competition for customer location $i\in I$ or $\mu_{i} = \sum_{c \in C} \check{u}_{ic}$ \\
+    $p_{ij}$ & Probability of customer $i\in I$ to patronize the autonomous locker unit located or the unit stopped at location $j\in J$, $p_{ij} = \frac{u_{ij}y_j}{\sum_{l \in J} u_{il} y_j + \sum_{l \in J} \frac{t_l}{d_{il}^\alpha} + \mu_i}$
+    or $p_{ij} = \frac{\frac{t_{j}}{d_{ij}^\alpha}}{\sum_{l \in J} u_{il} y_j + \sum_{l \in J} \frac{t_l}{d_{il}^\alpha} + \mu_i}$, respectively.\\
+    $\Gamma$ & Total working time for a mobile unit.\\
+    $w_{i}$ & Demand size of location $i\in I$.\\
+    $(a_j,b_j)$ & Minimum and maximum time, respectively, for a mobile locker unit to be parked at location $j\in J$ or $a_j \leq t_j \leq b_j$, $\forall j \in J$.\\
+    \hline
+\end{tabular}
+\end{threeparttable}
+\end{table}
+\normalsize
+
+We can recast the probability that a customer $i\in I$ will patronize location $j\in J$ as $p_{ij} = \frac{\pi_{ij} y_j}{\sum_{l \in J} \pi_{il} y_j + \sum_{l \in J} \gamma_{il} t_l + 1}$ or $p_{ij} = \frac{\gamma_{ij} y_j}{\sum_{l \in J} \pi_{il} y_j + \sum_{l \in J} \gamma_{il} t_l + 1}$, where $\pi_{ij} = \frac{u_{ij}}{\mu_i}$ and
+$\gamma_{ij} = \frac{1}{\mu_i d_{ij}^\alpha}$.
+\begin{table}[!h]
+  \centering
+  \caption{\label{tab:vars} List of variables}
+  \begin{threeparttable}
+  \begin{tabular}{cp{10cm}}
+    \hline
+    \thead{Variables} & \thead{Definition} \\ \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+    $y_{j}\in\{0,1\}$ & Equal 1, if a fixed locker unit is located at $j\in J$; 0, otherwise. \\ 
+    $z_{j}\in\{0,1\}$ & Equal 1, if a mobile locker unit parks at location $j\in J$; 0, otherwise. \\ 
+    $a \leq t_{j} \leq b$ & The total time a mobile locker spent parked at location $j\in J$.       \\ 
+    $x_{ij}\in\{0,1\}$ & Equal 1, if a mobile locker unit uses the
+    arc $(i,j)\in a$; 0, otherwise. \\
+     $f_{ij} \geq 0$ & Cumulative time of a mobile unit after using arc $(i,j) \in A$\\ \hline
+  \end{tabular}
+  %\begin{tablenotes}
+ % 
+ % \end{tablenotes}
+\end{threeparttable}
+\end{table}
+\fi
+
+\section{Notation, definitions and formulation}
+\pagebreak
+\newpage
+
+\begin{align}
+    \label{fo} \max & \sum_{i \in N} w_i \Bigg(\sum_{j \in J} \frac{\pi_{ij} y_j + \gamma_{ij}t_j}{
+    \sum_{l \in J} \pi_{il} y_l + \sum_{l \in J} \gamma_{il} t_l + 1}\Bigg) &&  \\
+    \text{subject to: } 
+    \label{r1a} & \sum_{(i,j) \in A} x_{ij} = z_i && \forall i \in I \\
+    \label{r1b} & \sum_{(i,j) \in A} x_{ij} = z_j && \forall j \in J \\
+    \label{r1b} & \sum_{(\delta,j) \in A} x_{\delta j} = n && \\
+    \label{r1c} & \sum_{(i,\bar{\delta}) \in E} x_{i\bar{\delta}} = n && \\
+%     \label{rsec} & \sum_{(i,j) \in A: i,j \in S} x_{ij} \leq \sum_{j \in S:j\neq l} y_j && \forall k \in K, l \in S: S \subset N \\
+    \label{r2} & z_j + y_j \leq 1 && \forall j \in J \\
+    \label{r6} & \sum_{j \in J}  y_{j} = p \\
+    \label{r3a} & f_{ij} \geq (\ell_{\delta i} + \ell_{ij}) x_{ij} && \forall (i,j) \in A : i,j \notin \{\delta, \bar{\delta}\} \\
+    \label{r3b} & f_{ij} \leq (\Gamma - \ell_{j\bar{\delta}})  x_{ij} && \forall (i,j) \in A : i,j \notin \{\delta, \bar{\delta}\} \\
+    \label{r3c} & \sum_{(i,j) \in A} f_{ij} + t_j + \sum_{(j,i) \in A} \ell_{ji} x_{ji} = \sum_{(j,i) \in A} f_{ji}  && \forall j \in J \\
+    \label{r5} &  a_j z_j \leq t_j \leq b_j z_j && \forall j \in J\\
+    \label{r12} & x_{ij} \in \{0,1\} && \forall (i,j) \in A\\
+    \label{r15} & f_{ij} \geq 0  && \forall (i,j) \in A\\
+    \label{r13} & y_j \in \{0,1\}    && \forall j \in J\\
+    \label{r14} & z_j \in \{0,1\}    && \forall j \in J 
+\end{align}
+
+The formulation \eqref{fo}-\eqref{r14} is a mixed-integer nonlinear program that 
+can be solved by an outer-approximation technique \citep{duran1986outer}.
+We can also recast the whole problem as a minimization one. We can minimize the total market lost or 
+
+\begin{align}
+    \label{minof} \min & \sum_{i \in N}\frac{w_i}{\sum_{l \in J} \pi_{il} y_l + \sum_{l \in J} \gamma_{il} t_l + 1}  && \\
+    \label{minr1} \text{subject to: } & \eqref{r1a}-\eqref{r14} &&
+\end{align}
+
+% ---------------------------------------------------------
+%
+% ---------------------------------------------------------
+\section{Solution Methodology}
+Note that the problem \eqref{minof}-\eqref{minr1} is a mixed-integer nonlinear program (MINLP) which has a differentiable, smooth, nonincreasing convex objective function \eqref{minof} and therefore can be handled by an outer-approximation (OA) algorithm \citep{duran1986outer}.
+The OA method solves a MINLP iteratively by alternating between the solution of a mixed-integer linear program (MIP) known as the master program (MP) and the separation of OA cuts. The MP has the original decision variables and their respective linear constraints, while the OA cuts are linear approximations of the nonlinearities
+evaluated at the MP current solution which are cumulatively added to it as
+the method iterates. At each iteration, a better approximation of the MINLP is attained as well as new values for the decision variables and better bounds for
+the original problem. 
+The OA algorithm converges to an optimal solution if one exists.
+Here we show three different variants of the method for the problem \eqref{minof}-
+\eqref{minr1}.
+
+
+\subsection{An outer-approximation approach using the original variables}
+
+First, let's  define $\phi_i(y,t)= \frac{1}{\sum_{j \in J} (\pi_{ij} y_j + \gamma_{ij} t_j) + 1}$ and an auxiliary variable $\eta_i \geq 0$ for each customer zone $i\in I$ used. $\eta$ underestimates the nonlinearities or captures the first-order approximations for the objective function \eqref{minof}. We can then the following OA master problem (OAMP) 
+that is equivalent to the original problem \eqref{minof}-\eqref{minr1}:
+
+\begin{align}
+    \label{oaminof} \min & \sum_{i \in N}w_i \eta_i && \\
+    \label{oaminr1} \text{subject to: } & \eqref{r1a}-\eqref{r14} && \\
+    \label{oacutsorig}  & \eta_i \geq \phi_i(\bar{y},\bar{t}) + \sum_{j\in J} (\frac{\partial{\phi_i(\bar{y},\bar{t}})}{\partial{y_j}}(y_j - \bar{y_j})+ \frac{\partial{\phi_i(\bar{y},\bar{t}})}{\partial{t_j}}(t_j - \bar{t_j})) && \forall i\in I, (\bar{y},\bar{t}) \in \mathbb{Y}\\
+    \label{oaetaorig} & \eta_i \geq 0 && \forall i \in I 
+\end{align}
+
+\noindent where $\mathbb{Y}$ is the set of feasible values for $y$ and $t$ and, 
+$ \frac{\partial{\phi_i(\bar{y},\bar{t}})}{\partial{y_j}} = - \frac{\pi_{ij}}{(\sum_{l \in J} (\pi_{il} \bar{y}_l + \gamma_{il} \bar{t}_l) + 1)^2}$
+and $ \frac{\partial{\phi_i(\bar{y},\bar{t}})}{\partial{t_j}} = - \frac{\gamma_{ij}}{(\sum_{l \in J} (\pi_{il} \bar{y}_l + \gamma_{il} \bar{t}_l) + 1)^2}$.
+
+\begin{algorithm}
+\caption{A basic OA algorithm for the problem \label{alg:basicoacutloop}}
+\SetAlgoLined
+%\begin{algorithmic}
+$UB,LB \gets \infty,-\infty$ \;
+$\mathbb{Y}\gets \{\}$\; 
+\While{$UB - LB \geq 0$} {
+    $(LB,\bar{y},\bar{t},\bar{\eta}) \gets OAMP(\mathbb{Y})$ \;
+    $UB \gets \min(UB,\displaystyle\sum_{i \in I} w_i \phi_i(\bar{y},\bar{t}))$ \;
+    $\mathbb{Y} \gets \mathbb{Y} \cup \{(\bar{y},\bar{t})\}$\;}
+%\end{algorithmic}
+\end{algorithm}
+
+\subsection{An outer-approximation approach using auxiliary variables}
+
+The  OA cuts \eqref{oacutsorig} are very dense and may actually slow down the OA convergence rate. One way to mitigate this is by replacing the denominator of the function $\phi(y,t)$ with an
+auxiliary variable $g_i = \sum_{j \in J} (\pi_{ij} y_j + \gamma_{ij} t_j) + 1$ and adding the respective relation
+as constraints to the OAMP or:
+
+\begin{align}
+    \label{oagminof} \min & \sum_{i \in N}w_i \eta_i && \\
+    \label{oagminr1} \text{subject to: } & \eqref{r1a}-\eqref{r14} && \\
+    \label{oacutsgorig}  & \eta_i \geq \frac{1}{\bar{g}_i} - \frac{1}{g_i^2}(g_i - \bar{g_i}) && \forall i\in I, \bar{g} \in \mathbb{G}\\
+    \label{oagr} & g_i = \sum_{j \in J} (\pi_{ij} y_j + \gamma_{ij} t_j) + 1 && \forall i \in I\\
+    \label{oaetaorig} & \eta_i \geq 0 && \forall i \in I  \\
+    \label{oag} & g_i \geq 0 && \forall i \in I 
+\end{align}
+
+\subsection{A mixed-integer conic quadratic program}
+
+It is possible to recast the formulation \eqref{minof}-\eqref{minr1} as a mixed-integer conic quadratic program (MICQP) which can be efficiently managed using second-order conic solvers, such as GUROBI or CPLEX. Conic programming optimizes a linear function
+over conic inequalities in the form of $||Ax-b||_2 \leq c'x - d$ \cite{bental2001}, where $||\cdot||_2$ is the L2 norm and $A$, $b$, $c$, and $d$ are rational parameter matrices or vectors of comfortable sizes.
+A special case of such inequalities is the rotated cone inequality of the form $x^2 \leq y z$ or $||(2x,y-z)||_2 \leq y + z$, where $x$, $y$, and $z$ are vectors of decision variables.
+
+We can use the hidden rotated conic structure of the formulation \eqref{minof}-\eqref{minr1} using variables $g_i$ and $\eta_i$
+for a customer zone $i\in I$. Note that since $\eta_i$ underestimates
+the percentage of the market lost for the customer of zone $i\in I$, we have
+$\eta_i \geq \frac{1}{g_i}$. Recall that $g_i = \sum_{j \in J} (\pi_{ij} y_j + \gamma_{ij} t_j) + 1$ and note that $g_i \geq 1$ actually. We can then define
+the following rotated cone inequality $\eta_i g_i \geq 1$, for all $i\in I$ to
+get the following MICQP equivalent to the original problem:
+
+\begin{align}
+    \label{oacminof} \min & \sum_{i \in N}w_i \eta_i && \\
+    \label{oacminr1} \text{subject to: } & \eqref{r1a}-\eqref{r14} && \\
+    %\label{oacutsgorig}  & \eta_i \geq \frac{1}{\bar{g}_i} - \frac{1}{g_i^2}(g_i - \bar{g_i}) && \forall i\in I, \bar{g} \in \mathbb{G}\\
+    \label{oacgr} & g_i = \sum_{j \in J} (\pi_{ij} y_j + \gamma_{ij} t_j) + 1 && \forall i \in I\\
+    \label{oaconic} & \eta_i g_i \geq 1 && \forall i \in I\\
+    \label{oaetacorig} & \eta_i \geq 0 && \forall i \in I  \\
+    \label{oacg} & g_i \geq 1 && \forall i \in I 
+\end{align}
+
+\subsection{An outer-approximation approach using second-order conic programming }
+
+The MICQP \eqref{oacminof}-\eqref{oacg} can have its mathematical structure
+enhanced by adding the OA cuts \eqref{oacutsgorig} either as a warm-start phase
+or on demand via the use of the solvers' callback functions such as \textit{lazy constraints} or \textit{user cuts}. Note that the warm-start phase does not require one
+to use linear programming to generate some initial cuts. One can adapt
+the strategy of \cite[Section 3.1]{elhedhli2005} and quickly generate some OA cuts.
+
+\section{Algorithmic enhancements}
+
+In this section, we briefly describe some algorithmic enhancements used to speed
+up the solution of each master problem or the MICQP.
+We discuss four families of valid inequalities capable of
+reinforcing the master problems (MP). They consist of connectivity
+constraints, clique conflict cuts, a class of
+the so-called arc-vertex inference cuts, and classical lifted cover
+inequalities based on dual bounds. Please, see the works
+of \cite{bianchessi2018,assuncao2021} for further details. 
+For the first OA algorithm devised, we also add mixed integer rounding-enhanced OA cuts to tighten the master problem
+similar to what \cite{bodur2017,liang2025} has done but for
+Benders decomposition algorithms. Finally, we detail a simple heuristic
+to obtain good initial upper bounds.
+
+\subsection{Connectivity constraints}
+\subsection{Clique conflict cuts}
+\subsection{Arc-vertex inference cuts}
+\subsection{Lifted cover inequalities}
+\subsection{MIR-enhanced OA cuts}
+\subsection{Heuristic}
+% ---------------------------------------------------------
+%
+% ---------------------------------------------------------
+\section*{\normalsize{ACKNOWLEDGMENTS}}
+%Acknowledgments should include contributions from anyone who does not meet the criteria for authorship (for example, to recognize contributions from people who provided technical help, collation of data, writing assistance, acquisition of funding, or a department chairperson who provided general support), as well as any funding or other support information.
+
+%REFERENCES
+%Note that references are placed in lexicographic order by author name. Multiple entries within a citation should appear in numerical order also, such as [2, 17, 19, 42].
+
+%\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document} 
