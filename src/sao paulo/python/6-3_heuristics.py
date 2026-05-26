@@ -1,36 +1,40 @@
 """
 6-3_heuristics.py
-=================
-Greedy construction + Large Neighbourhood Search (LNS) for the MNL locker
-location problem.  Designed for large instances where 6-2_gurobi_model.py
-is too slow.
+==================
+Two-phase heuristic for the MNL locker location problem.
 
-Algorithm overview
-------------------
-1. Greedy construction:
-     Open lockers one by one, always picking the candidate with the
-     largest marginal gain on the MNL objective.
+Phase 1 – Greedy Construction (Nemhauser et al. 1978 / Camargo 2024):
+    Open lockers sequentially by maximum marginal MNL gain.
+    Guarantees ≥ (1 − 1/e) ≈ 63 % of optimum due to submodularity.
 
-2. LNS improvement:
-     Repeat until time limit:
-       DESTROY : remove q lockers from the current solution
-       REPAIR  : build a small neighbourhood C, solve a restricted
-                 Gurobi sub-problem to choose the best q replacements
-       ACCEPT  : always accept improvements; optionally accept
-                 worse solutions via Simulated Annealing
+Phase 2 – Outer Approximation (Camargo 2024):
+    Iterative MILP with tangent-plane linearisation cuts of the concave
+    fractional objective.  Each iteration solves a tiny master MILP with
+    only |J| binary variables (vs. the full MILP's |I|×|J| variables).
+    Converges as cuts accumulate; gap tracked at every iteration.
+
+Bonus – Continuum Approximation routing cost (Stokkink & Geroliminis 2025):
+    Post-processing metric: estimates the delivery route length per zone
+    given the chosen locker placement, using the BHH formula.
+
+References:
+    Camargo R.S. (2024). Bilevel location-routing with MNL demand. UFMG.
+    Stokkink P., Geroliminis N. (2025). Optimal micro-hub locations in a
+      multi-modal last-mile delivery system. Transportation Research Part E
+      203, 104344.
 
 Inputs (produced by 6-1_data_preparation.py):
-  results/utils/zone_demand.csv      columns: zone_id, demand, u0, theta_max
-  results/utils/utility_matrix.csv   columns: zone_id, candidate_id, u_ij
+    results/utils/zone_demand.csv      zone_id, demand, u0, Z_bar, Z_under
+    results/utils/utility_matrix.csv   zone_id, candidate_id, u_ij
 
 Outputs:
-  results/mnl_greedy_results.csv     per-zone results after greedy
-  results/mnl_lns_results.csv        per-zone results after LNS
-  results/mnl_lns_convergence.csv    objective value per LNS iteration
+    results/mnl_greedy_results_P{P}.csv     per-zone results after Phase 1
+    results/mnl_oa_results_P{P}.csv         per-zone results after Phase 2
+    results/mnl_oa_convergence_P{P}.csv     OA iteration log
+    results/utils/solve_times.csv           runtime log (appended)
 """
 
 import math
-import random
 import time
 import numpy as np
 import pandas as pd
@@ -38,6 +42,7 @@ import gurobipy as gp
 from gurobipy import GRB
 from pathlib import Path
 import sys
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnl_utils import greedy_open as _greedy_open, build_results_df as _build_results_df
 
@@ -52,17 +57,19 @@ RESULTS_OUT  = SAO_PAULO / "results"
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
-P              = 5       # maximum number of lockers to open
-DESTROY_SIZE   = max(1, P // 3)    # q: lockers removed per LNS iteration
-NEIGHBOURHOOD  = 3 * DESTROY_SIZE  # K: candidate pool for REPAIR
-LNS_TIME_LIMIT = 300    # seconds for the full LNS loop
-SA_INITIAL_T   = None   # None = auto-calibrate from first few iterations
-SA_ALPHA       = 0.995  # cooling rate
-REPAIR_TIMELIM = 30     # seconds per Gurobi REPAIR sub-problem
-RANDOM_SEED    = 42
+import os
+P               = int(os.environ.get("MNL_P", 5))    # overridable via: MNL_P=3 python 6-3_...
 
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
+# Outer Approximation
+OA_MAX_ITER     = 100     # maximum number of OA iterations
+OA_TOL          = 1e-4    # convergence: stop when (UB - LB) / LB < OA_TOL
+OA_TIME_LIMIT   = 300     # seconds for the full OA phase
+OA_MASTER_TLIM  = 30      # seconds per master MILP solve
+
+# Continuum Approximation routing (Stokkink & Geroliminis 2025)
+TOUR_CAPACITY   = 20      # parcels per courier tour
+COURIER_SPEED   = 15.0    # km/h (cargo bike assumed)
+BHH_CONSTANT    = 0.57    # Beardwood-Halton-Hammersley constant
 
 # ---------------------------------------------------------------------------
 # 1. Load data
@@ -72,10 +79,9 @@ print("Loading prepared data …")
 zones_df = pd.read_csv(RESULTS_UTIL / "zone_demand.csv")
 util_df  = pd.read_csv(RESULTS_UTIL / "utility_matrix.csv")
 
-I         = list(zones_df["zone_id"])
-w         = dict(zip(zones_df["zone_id"], zones_df["demand"]))
-u0        = dict(zip(zones_df["zone_id"], zones_df["u0"]))
-theta_max = dict(zip(zones_df["zone_id"], zones_df["theta_max"]))
+I  = list(zones_df["zone_id"])
+w  = dict(zip(zones_df["zone_id"], zones_df["demand"]))
+u0 = dict(zip(zones_df["zone_id"], zones_df["u0"]))
 
 J = list(util_df["candidate_id"].unique())
 
@@ -85,272 +91,447 @@ u = {
     for _, row in util_df.iterrows()
 }
 
+total_demand = sum(w.values())
 print(f"  {len(I)} zones | {len(J)} candidates | P = {P}")
 
-# ---------------------------------------------------------------------------
-# Helper: evaluate the MNL objective for a given open set O
-# ---------------------------------------------------------------------------
-def mnl_objective(open_set: set) -> float:
-    """
-    Compute  Σ_i  w_i * S_i / (S_i + u0_i)
-    where    S_i = Σ_{j in open_set}  u[i, j]
-    """
-    total = 0.0
-    for i in I:
-        S_i = sum(u[i, j] for j in open_set)
-        total += w[i] * S_i / (S_i + u0[i])
-    return total
+# Pre-compute utility matrix as numpy array for fast gradient evaluation
+zone_list  = I
+cand_list  = J
+zone_idx   = {z: k for k, z in enumerate(zone_list)}
+cand_idx   = {j: k for k, j in enumerate(cand_list)}
+U_arr      = np.zeros((len(I), len(J)))    # U_arr[i_idx, j_idx] = u[zone, cand]
+W_arr      = np.array([w[i] for i in zone_list])
+U0_arr     = np.array([u0[i] for i in zone_list])
 
-
-def compute_S(open_set: set) -> dict:
-    """Return the per-zone attractiveness dict for a given open set."""
-    return {i: sum(u[i, j] for j in open_set) for i in I}
-
-
-def marginal_gain(j_new: str, S: dict) -> float:
-    """
-    Marginal gain of adding locker j_new given current attractiveness S_i.
-
-    Δ(j*) = Σ_i w_i * [u_ij * u0_i] / [(S_i + u_ij + u0_i)(S_i + u0_i)]
-    """
-    gain = 0.0
-    for i in I:
-        u_ij = u[i, j_new]
-        denom_before = S[i] + u0[i]
-        denom_after  = S[i] + u_ij + u0[i]
-        gain += w[i] * u_ij * u0[i] / (denom_after * denom_before)
-    return gain
+for (zi, cj), val in u.items():
+    U_arr[zone_idx[zi], cand_idx[cj]] = val
 
 # ---------------------------------------------------------------------------
-# 2. Greedy Construction  (delegates to mnl_utils.greedy_open)
+# Helper functions
 # ---------------------------------------------------------------------------
-def greedy_construction(p: int = P) -> tuple[set, float]:
+
+def mnl_objective_from_S(S_arr: np.ndarray) -> float:
+    """f = Σ_i w_i * S_i / (S_i + u0_i)  given S_arr shape (|I|,)."""
+    return float(np.sum(W_arr * S_arr / (S_arr + U0_arr)))
+
+
+def compute_S(y_bin: np.ndarray) -> np.ndarray:
+    """S_i = Σ_j u_ij * y_j.  y_bin shape (|J|,)."""
+    return U_arr @ y_bin   # shape (|I|,)
+
+
+def mnl_objective_from_y(y_bin: np.ndarray) -> float:
+    return mnl_objective_from_S(compute_S(y_bin))
+
+
+def gradient(S_arr: np.ndarray) -> np.ndarray:
+    """
+    ∂f / ∂y_j = Σ_i w_i * u_ij * u0_i / (S_i + u0_i)^2
+    Returns shape (|J|,).
+    """
+    denom2 = (S_arr + U0_arr) ** 2       # shape (|I|,)
+    coef   = W_arr * U0_arr / denom2     # shape (|I|,)
+    return coef @ U_arr                  # shape (|J|,)  via  Σ_i coef_i * u_ij
+
+
+def set_to_y(open_set) -> np.ndarray:
+    """Convert a set / list of candidate ids to a binary (|J|,) array."""
+    y = np.zeros(len(J))
+    for j in open_set:
+        y[cand_idx[j]] = 1.0
+    return y
+
+
+def y_to_set(y_bin: np.ndarray) -> set:
+    return {cand_list[k] for k in np.where(y_bin > 0.5)[0]}
+
+
+# ---------------------------------------------------------------------------
+# 2. Phase 1 — Greedy Construction
+# ---------------------------------------------------------------------------
+
+def greedy_phase(p: int = P) -> tuple[set, float, float]:
     """
     Open p lockers one by one by maximum marginal MNL gain.
-    Wraps mnl_utils.greedy_open with verbose step-by-step output.
-
-    Returns (open_set, objective_value).
+    Returns (open_set, objective_value, elapsed_seconds).
     """
-    print("\n── Greedy construction ──────────────────────────────────")
-    # Build step-by-step so we can print progress
-    S = {i: 0.0 for i in I}
-    open_set = set()
+    print("\n── Phase 1: Greedy Construction ────────────────────────────")
+    t0 = time.time()
+
+    S = np.zeros(len(I))
+    open_set: set = set()
+
     for step in range(p):
-        opened_so_far = list(open_set)
         remaining = [j for j in J if j not in open_set]
-        best_j = max(remaining, key=lambda j: marginal_gain(j, S))
-        delta  = marginal_gain(best_j, S)
+
+        best_j, best_gain = None, -1.0
+        for j in remaining:
+            jk       = cand_idx[j]
+            u_j      = U_arr[:, jk]
+            denom_b  = S + U0_arr
+            denom_a  = S + u_j + U0_arr
+            gain     = float(np.sum(W_arr * u_j * U0_arr / (denom_a * denom_b)))
+            if gain > best_gain:
+                best_gain, best_j = gain, j
+
         open_set.add(best_j)
-        for i in I:
-            S[i] += u[i, best_j]
-        obj = mnl_objective(open_set)
-        print(f"  Step {step + 1:2d}: open {best_j:30s}  Δ = {delta:.4f}  obj = {obj:.4f}")
+        S += U_arr[:, cand_idx[best_j]]
+        obj = mnl_objective_from_S(S)
+        print(f"  Step {step + 1:2d}: open {best_j:30s}  Δ = {best_gain:.4f}  "
+              f"obj = {obj:.2f}  ({obj / total_demand:.2%})")
 
-    final_obj = mnl_objective(open_set)
-    print(f"\nGreedy objective : {final_obj:.6f}")
-    return open_set, final_obj
-
-
-# ---------------------------------------------------------------------------
-# 3. LNS — REPAIR sub-problem (Gurobi)
-# ---------------------------------------------------------------------------
-def repair_subproblem(
-    fixed_open: set,
-    neighbourhood: list,
-    q: int,
-) -> set:
-    """
-    Solve a restricted Gurobi MILP:
-      - Lockers in `fixed_open` are already open (constants, not variables).
-      - Choose q lockers from `neighbourhood` to re-open.
-
-    Returns the set of q lockers selected by Gurobi.
-    """
-    # Pre-compute fixed attractiveness contribution
-    S_fixed = {i: sum(u[i, j] for j in fixed_open) for i in I}
-
-    C = neighbourhood  # candidate pool
-
-    model = gp.Model("LNS_REPAIR")
-    model.Params.OutputFlag = 0
-    model.Params.TimeLimit  = REPAIR_TIMELIM
-    model.Params.MIPGap     = 1e-3
-
-    # Variables
-    y     = model.addVars(C, vtype=GRB.BINARY, name="y")
-    theta = model.addVars(I, lb=0.0, name="theta")
-    for i in I:
-        # theta_max must account for S_fixed: theta = 1/(S_fixed + S_new + u0)
-        # maximum when S_new = 0: theta_max_repair = 1 / (S_fixed_i + u0_i)
-        theta[i].UB = 1.0 / (S_fixed[i] + u0[i]) if (S_fixed[i] + u0[i]) > 0 else theta_max[i]
-    z = model.addVars(I, C, lb=0.0, name="z")
-
-    # Objective: max Σ_i w_i * [ S_fixed_i * theta_i + Σ_{j in C} u_ij * z_ij ]
-    # The S_fixed * theta_i term is linear in theta_i (S_fixed is a constant).
-    model.setObjective(
-        gp.quicksum(
-            w[i] * (S_fixed[i] * theta[i] + gp.quicksum(u[i, j] * z[i, j] for j in C))
-            for i in I
-        ),
-        GRB.MAXIMIZE
-    )
-
-    # Charnes-Cooper: (S_fixed_i + Σ_k u_ik z_ik) + u0_i * theta_i = 1
-    # where S_fixed_i * theta_i appears inside the sum once we expand:
-    # θ_i * (S_fixed_i + S_new_i + u0_i) = 1
-    # ⟹  S_fixed_i * θ_i + Σ_k u_ik z_ik + u0_i θ_i = 1
-    for i in I:
-        model.addConstr(
-            S_fixed[i] * theta[i]
-            + gp.quicksum(u[i, k] * z[i, k] for k in C)
-            + u0[i] * theta[i]
-            == 1,
-            name=f"CC_{i}"
-        )
-
-    # McCormick on z[i,j] = y[j] * theta[i]
-    for i in I:
-        tm = theta[i].UB
-        for j in C:
-            model.addConstr(z[i, j] <= tm * y[j],                    name=f"M1_{i}_{j}")
-            model.addConstr(z[i, j] <= theta[i],                     name=f"M2_{i}_{j}")
-            model.addConstr(z[i, j] >= theta[i] - tm * (1 - y[j]),   name=f"M3_{i}_{j}")
-
-    # Budget on neighbourhood
-    model.addConstr(gp.quicksum(y[j] for j in C) <= q, name="budget")
-
-    model.optimize()
-
-    if model.Status not in [GRB.OPTIMAL, GRB.TIME_LIMIT] or model.SolCount == 0:
-        # Fallback: greedy within the neighbourhood
-        S = S_fixed.copy()
-        selected = set()
-        remaining = list(C)
-        for _ in range(q):
-            best = max(remaining, key=lambda j: marginal_gain(j, S))
-            selected.add(best)
-            remaining.remove(best)
-            for i in I:
-                S[i] += u[i, best]
-        return selected
-
-    return {j for j in C if y[j].X > 0.5}
+    elapsed = time.time() - t0
+    final_obj = mnl_objective_from_S(S)
+    print(f"\nGreedy objective : {final_obj:,.2f}  ({final_obj / total_demand:.2%})")
+    print(f"Runtime          : {elapsed:.2f} s")
+    return open_set, final_obj, elapsed
 
 
 # ---------------------------------------------------------------------------
-# 4. LNS Main Loop
+# 3. Phase 2 — Outer Approximation (Camargo 2024)
 # ---------------------------------------------------------------------------
-def lns(
+
+def outer_approximation(
     initial_open: set,
-    time_limit: float = LNS_TIME_LIMIT,
-    destroy_size: int = DESTROY_SIZE,
-    neighbourhood_size: int = NEIGHBOURHOOD,
-) -> tuple[set, float, list]:
+    p:            int   = P,
+    max_iter:     int   = OA_MAX_ITER,
+    tol:          float = OA_TOL,
+    time_limit:   float = OA_TIME_LIMIT,
+    master_tlim:  float = OA_MASTER_TLIM,
+) -> tuple[set, float, list, float]:
     """
-    Large Neighbourhood Search with Simulated Annealing acceptance.
+    Outer Approximation for MNL location (Camargo 2024).
 
-    Returns (best_open_set, best_objective, convergence_log).
-    convergence_log is a list of dicts {iteration, objective, best_objective, temperature}.
+    The concave MNL objective f(y) satisfies:
+        f(y) ≤ f(y^k) + ∇f(y^k)^T (y − y^k)   for all y ∈ {0,1}^|J|
+
+    Each iteration:
+        1. Solve master MILP with all linearisation cuts → UB
+        2. Evaluate true f at new binary y → candidate LB
+        3. Add new cut
+        4. Stop if (UB − LB) / LB < tol
+
+    Returns (best_open_set, best_obj, convergence_log, elapsed_seconds).
     """
-    print("\n── LNS ──────────────────────────────────────────────────")
+    print("\n── Phase 2: Outer Approximation ────────────────────────────")
+    t0 = time.time()
 
-    current  = set(initial_open)
-    best     = set(initial_open)
-    obj_cur  = mnl_objective(current)
-    obj_best = obj_cur
+    # ---------- Initialise with greedy solution ----------
+    y_init = set_to_y(initial_open)
+    S_init = compute_S(y_init)
+    f_init = mnl_objective_from_S(S_init)
+    g_init = gradient(S_init)
 
-    # Auto-calibrate SA temperature: T0 such that a 1% loss is accepted ~50%
-    # exp(-delta / T0) = 0.5  with delta = 0.01 * obj_cur
-    # => T0 = 0.01 * obj_cur / ln(2)
-    T = SA_INITIAL_T if SA_INITIAL_T is not None else 0.01 * obj_cur / math.log(2)
-    print(f"  Initial objective : {obj_cur:.6f}  |  T0 = {T:.4e}")
+    # Cuts stored as list of (f_k, g_k, y_k) — all numpy arrays
+    cuts    = [(f_init, g_init, y_init)]
+    LB      = f_init
+    UB      = float("inf")
+    best_y  = y_init.copy()
 
     convergence = []
-    iteration   = 0
-    t_start     = time.time()
+    print(f"  Initial (greedy): f = {f_init:,.2f}  ({f_init / total_demand:.2%})")
 
-    while time.time() - t_start < time_limit:
-        iteration += 1
+    for it in range(1, max_iter + 1):
+        t_remaining = time_limit - (time.time() - t0)
+        if t_remaining <= 0:
+            print(f"  Time limit reached at iteration {it}.")
+            break
 
-        # ── DESTROY ──────────────────────────────────────────────────────
-        R_removed = set(random.sample(list(current), destroy_size))
-        remaining = current - R_removed   # fixed open lockers
+        # ── Solve OA master MILP ──────────────────────────────────────────
+        master = gp.Model("OA_master")
+        master.Params.OutputFlag = 0
+        master.Params.TimeLimit  = min(master_tlim, t_remaining)
+        master.Params.MIPGap     = 1e-4
 
-        # ── BUILD NEIGHBOURHOOD ──────────────────────────────────────────
-        # Score all candidates not in `remaining` by greedy gain
-        S_fixed = compute_S(remaining)
-        pool    = [j for j in J if j not in remaining]
-        pool.sort(key=lambda j: marginal_gain(j, S_fixed), reverse=True)
-        neighbourhood = pool[:neighbourhood_size]
+        y   = master.addVars(len(J), vtype=GRB.BINARY, name="y")
+        eta = master.addVar(lb=0.0, ub=total_demand, name="eta")
 
-        # ── REPAIR ───────────────────────────────────────────────────────
-        new_lockers = repair_subproblem(remaining, neighbourhood, destroy_size)
-        candidate   = remaining | new_lockers
+        master.setObjective(eta, GRB.MAXIMIZE)
+        master.addConstr(gp.quicksum(y[k] for k in range(len(J))) <= p, name="budget")
 
-        # ── EVALUATE & ACCEPT ────────────────────────────────────────────
-        obj_cand = mnl_objective(candidate)
-        delta    = obj_cand - obj_cur
+        # Add one linearisation cut per past iterate
+        for (f_k, g_k, y_k) in cuts:
+            rhs_const = f_k - float(g_k @ y_k)   # f_k − g_k^T y_k
+            master.addConstr(
+                eta <= rhs_const + gp.quicksum(float(g_k[k]) * y[k]
+                                               for k in range(len(J)))
+            )
 
-        accepted = False
-        if delta > 0 or (T > 1e-10 and random.random() < math.exp(delta / T)):
-            current = candidate
-            obj_cur = obj_cand
-            accepted = True
+        master.optimize()
 
-        if obj_cur > obj_best:
-            best     = set(current)
-            obj_best = obj_cur
+        if master.SolCount == 0:
+            print(f"  Master returned no solution at iter {it} — stopping.")
+            break
 
-        # ── COOL ─────────────────────────────────────────────────────────
-        T *= SA_ALPHA
+        UB    = min(UB, master.ObjVal)
+        y_new = np.array([y[k].X for k in range(len(J))])
 
-        elapsed = time.time() - t_start
+        # ── Evaluate true objective ───────────────────────────────────────
+        y_bin = (y_new > 0.5).astype(float)  # round to binary
+        S_new = compute_S(y_bin)
+        f_new = mnl_objective_from_S(S_new)
+        g_new = gradient(S_new)
+
+        if f_new > LB:
+            LB     = f_new
+            best_y = y_bin.copy()
+
+        # ── Add new cut ───────────────────────────────────────────────────
+        cuts.append((f_new, g_new, y_bin))
+
+        gap     = (UB - LB) / LB if LB > 0 else float("inf")
+        elapsed = time.time() - t0
+
         convergence.append({
-            "iteration":      iteration,
-            "objective":      round(obj_cur, 6),
-            "best_objective": round(obj_best, 6),
-            "temperature":    round(T, 8),
+            "iteration":      it,
+            "UB":             round(UB,  2),
+            "LB":             round(LB,  2),
+            "gap_pct":        round(gap * 100, 4),
             "elapsed_s":      round(elapsed, 2),
-            "accepted":       accepted,
+            "n_cuts":         len(cuts),
         })
 
-        if iteration % 10 == 0:
-            print(f"  Iter {iteration:4d} | obj = {obj_cur:.4f} | best = {obj_best:.4f} "
-                  f"| T = {T:.3e} | {elapsed:.0f}s")
+        print(f"  Iter {it:3d}: UB = {UB:,.2f}  LB = {LB:,.2f}  "
+              f"gap = {gap:.3%}  ({elapsed:.0f}s)")
 
-    print(f"\nLNS finished after {iteration} iterations ({time.time() - t_start:.0f}s)")
-    print(f"Best objective : {obj_best:.6f}  (greedy was {mnl_objective(initial_open):.6f})")
-    return best, obj_best, convergence
+        if gap < tol:
+            print(f"  ✓ Converged at iteration {it}  (gap = {gap:.4%} < {tol:.4%})")
+            break
+
+        # If the master returned the same binary solution as last time → converged
+        if it > 1 and float(np.sum(np.abs(y_bin - cuts[-2][2]))) < 0.5:
+            print(f"  ✓ Binary solution unchanged at iteration {it} — converged.")
+            break
+
+    elapsed_total = time.time() - t0
+    open_set = y_to_set(best_y)
+    final_obj = mnl_objective_from_S(compute_S(best_y))
+
+    print(f"\nOA best objective : {final_obj:,.2f}  ({final_obj / total_demand:.2%})")
+    print(f"Runtime           : {elapsed_total:.2f} s  ({len(cuts)} cuts added)")
+    return open_set, final_obj, convergence, elapsed_total
 
 
 # ---------------------------------------------------------------------------
-# 5. Run
+# 4. Routing Cost (Stokkink & Geroliminis 2025 — Continuum Approximation)
+# ---------------------------------------------------------------------------
+
+def routing_cost_ca(open_set: set) -> pd.DataFrame:
+    """
+    Estimate delivery routing length per zone using the Continuum
+    Approximation framework of Stokkink & Geroliminis (2025).
+
+    For each zone i the estimated total courier distance (km/day) is:
+        L_i^intra = BHH * sqrt(A_i * d_i)      (intra-zone)
+        L_i^inter = 2 * m_i * dist(i, nearest locker)  (line-haul)
+    where m_i = ceil(d_i / TOUR_CAPACITY).
+
+    We do not have zone areas directly; we approximate A_i ∝ 1/zone_density
+    by setting A_i = 1 / sqrt(|I|)  (unit normalisation) for illustration.
+    Users should replace this with actual zone areas if available.
+
+    Returns a DataFrame with columns:
+        zone_id, demand, nearest_locker, dist_km (approx),
+        tours_per_day, intra_km, inter_km, total_km
+    """
+    # Load zone centroids (lat/lon) from df_clients_grids.csv
+    clients_path = RESULTS_UTIL / "df_clients_grids.csv"
+    if not clients_path.exists():
+        print("  [CA routing] df_clients_grids.csv not found — skipping.")
+        return pd.DataFrame()
+
+    df_c = pd.read_csv(clients_path)
+    df_c.columns = [c.strip() for c in df_c.columns]
+
+    grid_col = next((c for c in df_c.columns
+                     if "grid" in c.lower() or "quadrado" in c.lower()), None)
+    lat_col  = next((c for c in df_c.columns if c.lower() == "latitude"),  None)
+    lon_col  = next((c for c in df_c.columns if c.lower() == "longitude"), None)
+
+    if not all([grid_col, lat_col, lon_col]):
+        print("  [CA routing] Could not detect grid/lat/lon columns — skipping.")
+        return pd.DataFrame()
+
+    centroids = (
+        df_c.groupby(grid_col)[[lat_col, lon_col]]
+        .mean().reset_index()
+        .rename(columns={grid_col: "zone_id", lat_col: "lat", lon_col: "lon"})
+    )
+    centroids["zone_id"] = centroids["zone_id"].astype(int)
+    zone_coords = centroids.set_index("zone_id")[["lat", "lon"]].to_dict("index")
+
+    # Load candidate coordinates from data.xlsx if possible
+    # Fallback: we cannot compute inter-zone distances without locker coordinates.
+    # We output intra-zone only in that case.
+    data_xlsx = SAO_PAULO / "data" / "data.xlsx"
+    if data_xlsx.exists():
+        try:
+            cand_df = pd.read_excel(data_xlsx, sheet_name="candidates")[
+                ["Nome", "Latitude", "Longitude"]
+            ].rename(columns={"Nome": "candidate_id"})
+            cand_coords = {
+                row["candidate_id"]: (row["Latitude"], row["Longitude"])
+                for _, row in cand_df.iterrows()
+            }
+        except Exception:
+            cand_coords = {}
+    else:
+        cand_coords = {}
+
+    # Approximate area (km²) — uniform approximation across zones
+    # (replace with real area data if available)
+    approx_area_km2 = 4.0    # rough urban grid cell ~2×2 km
+
+    rows = []
+    for i in I:
+        d_i = w[i]
+        m_i = math.ceil(d_i / max(TOUR_CAPACITY, 1))
+
+        # Intra-zone (BHH formula)
+        intra_km = BHH_CONSTANT * math.sqrt(approx_area_km2 * d_i)
+
+        # Inter-zone: distance to nearest open locker
+        nearest_j, dist_km = None, float("inf")
+        if i in zone_coords and cand_coords:
+            zi_lat, zi_lon = zone_coords[i]["lat"], zone_coords[i]["lon"]
+            DEG_TO_KM      = 111.0
+            for j in open_set:
+                if j in cand_coords:
+                    jlat, jlon = cand_coords[j]
+                    d = math.sqrt(((zi_lat - jlat) * DEG_TO_KM) ** 2 +
+                                  ((zi_lon - jlon) * DEG_TO_KM *
+                                   math.cos(math.radians(zi_lat))) ** 2)
+                    if d < dist_km:
+                        dist_km, nearest_j = d, j
+
+        inter_km = 2.0 * m_i * dist_km if dist_km < float("inf") else float("nan")
+
+        rows.append({
+            "zone_id":       i,
+            "demand":        round(d_i, 2),
+            "nearest_locker": nearest_j,
+            "dist_km":       round(dist_km, 3) if dist_km < float("inf") else None,
+            "tours_per_day": m_i,
+            "intra_km":      round(intra_km, 3),
+            "inter_km":      round(inter_km, 3) if not math.isnan(inter_km) else None,
+            "total_km":      round(intra_km + inter_km, 3)
+                             if not math.isnan(inter_km) else round(intra_km, 3),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# 5. Shared helpers
+# ---------------------------------------------------------------------------
+
+def build_results(open_set: set) -> pd.DataFrame:
+    """Build per-zone result DataFrame compatible with the Streamlit map."""
+    rows = []
+    for i in I:
+        S_i  = sum(u[i, j] for j in open_set)
+        ms_i = S_i / (S_i + u0[i]) if (S_i + u0[i]) > 0 else 0.0
+        rows.append({
+            "zone_id":          i,
+            "demand":           round(w[i], 2),
+            "S_i":              round(S_i, 8),
+            "market_share_pct": round(ms_i * 100, 3),
+            "captured":         round(w[i] * ms_i, 2),
+        })
+    return pd.DataFrame(rows).sort_values("captured", ascending=False)
+
+
+def append_solve_time(method: str, p: int, total_s: float,
+                      obj: float, market_share_pct: float,
+                      detail: str = "") -> None:
+    """
+    Append a runtime record to results/utils/solve_times.csv.
+    total_s  = full wall-clock time for the method (seconds)
+    detail   = optional breakdown string, e.g. "greedy=0.8s + OA=45.2s"
+    """
+    RESULTS_UTIL.mkdir(parents=True, exist_ok=True)
+    path = RESULTS_UTIL / "solve_times.csv"
+
+    row = pd.DataFrame([{
+        "method":            method,
+        "P":                 p,
+        "solve_time_s":      round(total_s, 2),
+        "detail":            detail,
+        "objective":         round(obj, 2),
+        "market_share_pct":  round(market_share_pct, 3),
+    }])
+
+    if path.exists():
+        existing = pd.read_csv(path)
+        existing = existing[~((existing["method"] == method) & (existing["P"] == p))]
+        row = pd.concat([existing, row], ignore_index=True)
+
+    row.to_csv(path, index=False)
+    print(f"  Solve time logged → {path}")
+
+
+# ---------------------------------------------------------------------------
+# 6. Run
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    total_demand = sum(w.values())
-
-    # ── Phase A: Greedy ───────────────────────────────────────────────────
-    greedy_open, greedy_obj = greedy_construction(P)
-
-    df_greedy = _build_results_df(greedy_open, I, w, u, u0)
-    print(f"\nGreedy market share : {df_greedy['captured'].sum() / total_demand:.2%}")
-
     RESULTS_OUT.mkdir(parents=True, exist_ok=True)
+
+    # ── Phase 1: Greedy ───────────────────────────────────────────────────
+    greedy_open_set, greedy_obj, greedy_time = greedy_phase(P)
+
+    df_greedy = build_results(greedy_open_set)
+    greedy_share = df_greedy["captured"].sum() / total_demand
+
     df_greedy.to_csv(RESULTS_OUT / f"mnl_greedy_results_P{P}.csv", index=False)
-    print(f"Saved: {RESULTS_OUT / 'mnl_greedy_results.csv'}")
+    pd.DataFrame({"candidate_id": sorted(greedy_open_set)}).to_csv(
+        RESULTS_OUT / f"mnl_greedy_lockers_P{P}.csv", index=False)
+    print(f"Saved: mnl_greedy_results_P{P}.csv + lockers  "
+          f"(market share = {greedy_share:.2%})")
 
-    # ── Phase B: LNS ─────────────────────────────────────────────────────
-    lns_open, lns_obj, convergence = lns(greedy_open)
+    append_solve_time(
+        method="Greedy", p=P,
+        total_s=greedy_time,
+        obj=greedy_obj, market_share_pct=greedy_share * 100,
+        detail=f"greedy={greedy_time:.2f}s",
+    )
 
-    df_lns  = _build_results_df(lns_open, I, w, u, u0)
-    df_conv = pd.DataFrame(convergence)
+    # ── Phase 2: Outer Approximation ──────────────────────────────────────
+    oa_open_set, oa_obj, oa_conv, oa_time = outer_approximation(greedy_open_set, p=P)
 
-    print(f"\nLNS market share    : {df_lns['captured'].sum() / total_demand:.2%}")
-    print(f"Improvement over greedy: "
-          f"{(lns_obj - greedy_obj) / greedy_obj * 100:+.2f}%")
-    print(f"\nOpen lockers (LNS): {sorted(lns_open)}")
+    df_oa   = build_results(oa_open_set)
+    df_conv = pd.DataFrame(oa_conv)
+    oa_share = df_oa["captured"].sum() / total_demand
 
-    df_lns.to_csv(RESULTS_OUT / f"mnl_lns_results_P{P}.csv", index=False)
-    df_conv.to_csv(RESULTS_OUT / f"mnl_lns_convergence_P{P}.csv", index=False)
-    print(f"Saved: {RESULTS_OUT / 'mnl_lns_results.csv'}")
-    print(f"Saved: {RESULTS_OUT / 'mnl_lns_convergence.csv'}")
+    df_oa.to_csv(RESULTS_OUT / f"mnl_oa_results_P{P}.csv",           index=False)
+    df_conv.to_csv(RESULTS_OUT / f"mnl_oa_convergence_P{P}.csv",     index=False)
+    pd.DataFrame({"candidate_id": sorted(oa_open_set)}).to_csv(
+        RESULTS_OUT / f"mnl_oa_lockers_P{P}.csv", index=False)
+    print(f"Saved: mnl_oa_results_P{P}.csv + lockers  "
+          f"(market share = {oa_share:.2%})")
+    print(f"Saved: mnl_oa_convergence_P{P}.csv")
+
+    append_solve_time(
+        method="OA (Outer Approx.)", p=P,
+        total_s=greedy_time + oa_time,
+        obj=oa_obj, market_share_pct=oa_share * 100,
+        detail=f"greedy={greedy_time:.2f}s + OA={oa_time:.2f}s",
+    )
+
+    # Summary
+    print("\n" + "=" * 60)
+    print(f"Open lockers (greedy): {sorted(greedy_open_set)}")
+    print(f"Open lockers (OA)    : {sorted(oa_open_set)}")
+    print(f"\nMarket share — Greedy        : {greedy_share:.2%}")
+    print(f"Market share — OA            : {oa_share:.2%}")
+    improvement = (oa_obj - greedy_obj) / greedy_obj * 100
+    print(f"Improvement of OA over greedy: {improvement:+.2f}%")
+    print("=" * 60)
+
+    # ── Bonus: Routing Cost (Stokkink & Geroliminis 2025 CA) ─────────────
+    print("\n── Bonus: Routing Cost Estimation (CA) ─────────────────────")
+    df_routing = routing_cost_ca(oa_open_set)
+    if not df_routing.empty:
+        df_routing.to_csv(RESULTS_OUT / f"mnl_routing_ca_P{P}.csv", index=False)
+        total_km = df_routing["total_km"].sum()
+        print(f"Total estimated courier distance: {total_km:,.0f} km/day")
+        print(f"Saved: mnl_routing_ca_P{P}.csv")

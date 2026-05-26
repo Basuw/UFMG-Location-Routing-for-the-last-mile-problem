@@ -45,7 +45,8 @@ A_J          = 1.0    # intrinsic attractiveness  (uniform; adjust if capacity d
 EPS          = 1e-6   # avoid division by zero for co-located points
 TARGET_SHARE = 0.15   # target market share for one locker at median distance
                       # used to derive uniform competitor baseline u0
-P_BOUND      = 7      # number of lockers used to compute tight Z_bar / Z_under bounds
+import os
+P_BOUND = int(os.environ.get("MNL_P", 7))   # overridable via: MNL_P=3 python 6-1_...
                       # should match the P value in 6-2_gurobi_model.py
 
 # ---------------------------------------------------------------------------
