@@ -180,7 +180,7 @@ convergence takes **5–30 iterations** (< 60 seconds).
 |---|---|---|
 | Variables per solve | $|J| + |I| + |I||J|$ | $|J| + 1$ |
 | Constraints per solve | $|I|(3|J|+1) + 1$ | $t + 1$ (grows with iterations) |
-| Solve time (São Paulo, P=7) | ~3–5 min | ~30–60 s |
+| Solve time (São Paulo, P=7) | ~6200 s | ~30–60 s |
 | Optimality gap | ≤ MIP_GAP (5%) | provably ≤ ε at convergence |
 | Warm start needed | Yes (greedy) | Yes (greedy, Phase 1) |
 

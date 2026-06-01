@@ -249,6 +249,42 @@ col2.metric("Captured demand",      f"{total_captured:,.0f} parcels")
 col3.metric("Overall market share", f"{overall_share:.1%}")
 col4.metric("Open lockers",         str(len(open_locker_ids)) if open_locker_ids else f"P={selected_p}")
 
+# ── Method info bar ───────────────────────────────────────────────────────────
+# Show MIP gap for Exact MILP, and whether this method's lockers differ
+_info_parts = []
+if solve_times is not None and selected_method and selected_p is not None:
+    _st_row = solve_times[
+        (solve_times["method"] == selected_method) & (solve_times["P"] == selected_p)
+    ]
+    if not _st_row.empty:
+        _detail = str(_st_row["detail"].values[0])
+        if "gap=" in _detail:
+            _gap_str = _detail.split("gap=")[1].split()[0].rstrip(",")
+            _info_parts.append(f"**MIP gap:** {_gap_str}")
+        if "[" in _detail:
+            _stop = _detail.split("[")[1].rstrip("]")
+            _info_parts.append(f"**Stop:** {_stop}")
+
+# Compare lockers with the other two methods
+if open_locker_ids and selected_p is not None:
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)"] if m != selected_method]
+    _cur_set = set(open_locker_ids)
+    _diff_flags = []
+    for _om in _other_methods:
+        _op = lockers_path(_om, selected_p)
+        if _op.exists():
+            _other_set = set(pd.read_csv(_op)["candidate_id"].tolist())
+            if _cur_set == _other_set:
+                _diff_flags.append(f"= {_om}")
+            else:
+                _n_diff = len(_cur_set.symmetric_difference(_other_set))
+                _diff_flags.append(f"≠ {_om} ({_n_diff} lockers differ)")
+    if _diff_flags:
+        _info_parts.append("**vs others:** " + "  |  ".join(_diff_flags))
+
+if _info_parts:
+    st.info("  ·  ".join(_info_parts))
+
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
@@ -288,8 +324,8 @@ if solve_times is not None and not solve_times.empty:
 
         def _highlight(row):
             if "Method" in row.index and row["Method"] == selected_method:
-                return ["background-color: #2e7d32; color: white; font-weight: bold"] * len(row)
-            return [""] * len(row)
+                return ["background-color: #2e7d32; color: #ffffff; font-weight: bold"] * len(row)
+            return ["color: #111111; background-color: #f9f9f9"] * len(row)
 
         st.dataframe(
             show_df.style.apply(_highlight, axis=1),
@@ -297,9 +333,9 @@ if solve_times is not None and not solve_times.empty:
             height=min(100 + 38 * len(show_df), 260),
         )
 
-    # ── Right: runtime vs P line chart (all methods, all P) ──────────────
+    # ── Right: runtime vs P line chart (log scale) ───────────────────────
     with tab_right:
-        st.markdown("**Runtime vs P — all methods**")
+        st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
             methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP"]
             colours = {
@@ -316,30 +352,30 @@ if solve_times is not None and not solve_times.empty:
                 )
                 if df_m.empty:
                     continue
+                # Floor at 0.01s so log scale stays valid even for near-zero times
+                y_vals = df_m["solve_time_s"].clip(lower=0.01)
                 # Highlight the selected P with a larger marker
-                marker_sizes = [
-                    14 if p == selected_p else 8
-                    for p in df_m["P"]
-                ]
+                marker_sizes = [14 if p == selected_p else 8 for p in df_m["P"]]
                 fig_trend.add_trace(go.Scatter(
                     x=df_m["P"],
-                    y=df_m["solve_time_s"],
+                    y=y_vals,
                     mode="lines+markers",
                     name=meth,
                     line=dict(color=colours.get(meth, "#888"), width=2),
-                    marker=dict(size=marker_sizes,
-                                color=colours.get(meth, "#888")),
+                    marker=dict(size=marker_sizes, color=colours.get(meth, "#888")),
+                    customdata=df_m["solve_time_s"].values,
                     hovertemplate=(
                         f"<b>{meth}</b><br>"
                         "P = %{x}<br>"
-                        "Runtime: %{y:.1f}s<extra></extra>"
+                        "Runtime: %{customdata:.2f}s<extra></extra>"
                     ),
                 ))
 
             fig_trend.update_layout(
                 xaxis_title="P (number of open lockers)",
                 yaxis_title="Runtime (s)",
-                height=240,
+                yaxis_type="log",
+                height=260,
                 margin=dict(l=40, r=20, t=10, b=40),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                 hovermode="x unified",
@@ -348,7 +384,6 @@ if solve_times is not None and not solve_times.empty:
             milp_df = st_all[st_all["method"] == "Exact MILP"]
             if not milp_df.empty and "solve_time_s" in milp_df.columns:
                 max_milp = milp_df["solve_time_s"].max()
-                # If most MILP times cluster near max_milp → likely timeout
                 near_max = (milp_df["solve_time_s"] >= max_milp * 0.9).sum()
                 if near_max >= 2:
                     fig_trend.add_hline(
@@ -360,6 +395,35 @@ if solve_times is not None and not solve_times.empty:
                         annotation_position="bottom right",
                     )
             st.plotly_chart(fig_trend, use_container_width=True)
+
+    # ── Locker comparison across methods for selected P ───────────────────
+    st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
+    _locker_rows = []
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)"]:
+        _lpath = lockers_path(_m, selected_p)
+        if _lpath.exists():
+            _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())
+            _locker_rows.append({"Method": _m, "Open lockers": "  ·  ".join(_ids)})
+    if _locker_rows:
+        _ldf = pd.DataFrame(_locker_rows)
+        # Find reference set (first method available)
+        _ref_set = set(_locker_rows[0]["Open lockers"].split("  ·  "))
+        def _hl_locker(row):
+            cur_set = set(row["Open lockers"].split("  ·  "))
+            if row["Method"] == selected_method:
+                # Selected method: green highlight
+                return ["background-color: #2e7d32; color: #ffffff; font-weight: bold"] * len(row)
+            if cur_set == _ref_set:
+                # Same lockers as the first method: amber tint, dark text
+                return ["background-color: #fff3cd; color: #111111"] * len(row)
+            # Different lockers: neutral dark text, explicit so dark-mode doesn't invert it
+            return ["color: #111111; background-color: #f0f0f0"] * len(row)
+        st.dataframe(
+            _ldf.style.apply(_hl_locker, axis=1),
+            use_container_width=True,
+            hide_index=True,
+            height=min(80 + 35 * len(_ldf), 200),
+        )
 
 st.markdown("---")
 
