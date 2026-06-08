@@ -424,3 +424,38 @@ if _log_path.exists():
     _row = pd.concat([_ex, _row], ignore_index=True)
 _row.to_csv(_log_path, index=False)
 print(f"Runtime logged → {_log_path}  ({_t_elapsed:.0f}s)")
+
+
+# =============================================================================
+# QUESTIONS
+# =============================================================================
+#
+# Q1. omega_{ij} dans l'objectif UL (terme c_ij * x_ij * omega_{ij}) :
+#     Typo pour omega_i ? L'indice j n'est defini nulle part.
+#     => Actuellement implemente comme omega_i.
+#
+# Q2. A_j dans c_ij ~= l_ij * sqrt(A_j * eta_i) -- AMBIGUITE CRITIQUE :
+#     (a) Aire de la cellule de Voronoi du locker j [km2]
+#         -> interpretation BHH (Stokkink eq. 15) : zone desservie par j
+#         -> calculable si on construit les diagrammes de Voronoi des lockers
+#     (b) Attractivite intrinseque du locker j (parametre de Huff)
+#         -> dans le .tex Camargo, A_j = attractivite = 1.0 (uniforme)
+#         -> rendrait c_ij = l_ij * sqrt(eta_i)
+#     => Actuellement : A_FACILITY = 50.0 km2 (arbitraire).
+#
+# Q3. Formule complete de c_ij :
+#     Chez Stokkink, c_ij = rho*(h_ij + L_j) avec deux composantes :
+#       h_ij = 2 * t_ij * m_j  (line-haul aller-retour x nb tournees)
+#       L_j  = k*sqrt(A_j * n_j) (intra-zone BHH)
+#     La formule du .md, c_ij ~= l_ij*sqrt(A_j*eta_i), fusionne les deux.
+#     Est-ce intentionnel ou faut-il implementer l'eq. complete (17) ?
+#
+# Q4. Dernier terme sum_i omega_i * Z_i = demande NON capturee :
+#     Y a-t-il un cout unitaire multiplicatif (ex. cout livraison domicile) ?
+#     => Actuellement COST_UNCAPTURED = 0 (terme present mais sans cout).
+#
+# Q5. f_j (cout fixe d'ouverture) :
+#     Uniforme pour tous les sites ? Chez Stokkink f_i = 60 EUR/jour.
+#     Avons-nous des donnees reelles par site ?
+#     => Actuellement F_FIXED = 1000 (arbitraire, sans unite).
+# =============================================================================
