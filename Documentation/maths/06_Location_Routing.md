@@ -44,6 +44,9 @@ $$
 \sum_{i} \omega_{i} x_{ij} \le Qq_j \qquad \forall J
 $$
 
+$$
+x_{ij} \le y_j \qquad \forall i,j
+$$
 
 $$
 q_j \le My_j \qquad \forall J
@@ -64,7 +67,7 @@ $$
 c_{ij} \approxeq l_{ij} \sqrt{A_j.\eta_i } \rarr \text{Approximation of routing cost}
 $$
 
----
+
 
 ## Variables and parameters
 
@@ -87,9 +90,9 @@ $$
 
 | Symbol | Meaning | Source / Value |
 |---|---|---|
-| $f_j \geq 0$ | Fixed opening cost of locker $j$ (rental, infrastructure) | **⚠ to be calibrated** — uniform across all sites or site-specific? |
-| $a_j \geq 0$ | Cost per delivery staff member assigned to locker $j$ (daily wage, etc.) | **⚠ to be calibrated** — corresponds to $\rho$ in Stokkink (cost per km traveled by a courier) |
-| $Q$ | Courier capacity: number of parcels that can be delivered per shift | **⚠ to be calibrated** — $q^{shift}$ in Stokkink (12 parcels/tour × 4 tours = 48) |
+| $f_j \geq 0$ | Fixed opening cost of locker $j$ (rental, infrastructure) | <span style="color: green;">**⚠ to be calibrated**</span> — uniform across all sites or site-specific? |
+| $a_j \geq 0$ | Cost per delivery staff member assigned to locker $j$ (daily wage, etc.) |  <span style="color: green;">**⚠ to be calibrated**</span> — corresponds to $\rho$ in Stokkink (cost per km traveled by a courier) |
+| $Q$ | Courier capacity: number of parcels that can be delivered per shift |  <span style="color: green;">**⚠ to be calibrated**</span> — $q^{shift}$ in Stokkink (12 parcels/tour × 4 tours = 48) |
 | $M$ | Big-M: upper bound on $q_j$ (e.g. $\lceil \sum_i \omega_i / Q \rceil$) | Computed automatically |
 
 ### Demand and utility parameters
@@ -111,7 +114,7 @@ $$
 |---|---|---|
 | $c_{ij}$ | Total delivery cost from locker $j$ to zone $i$ per unit of demand | Computed |
 | $l_{ij}$ | Distance (km) between the centroid of zone $i$ and locker $j$ — inter-zone (line-haul) component | `df_dist_dcs.csv`, column `Distance` |
-| $A_j$ | **⚠ AMBIGUOUS** — either the **area of the Voronoi cell of locker $j$** [km²] (BHH interpretation from Stokkink), or the **intrinsic attractiveness** $A_j$ of the Huff model (same letter in the paper's `.tex` file) | **To be clarified with professor** |
+| $A_j$ |  <span style="color: red;">**⚠ AMBIGUOUS**</span> — either the **area of the Voronoi cell of locker $j$** [km²] (BHH interpretation from Stokkink), or the **intrinsic attractiveness** $A_j$ of the Huff model (same letter in the paper's `.tex` file) | <span style="color: red;">**To be clarified**</span> |
 | $\eta_i$ | Delivery density in zone $i$: $\eta_i = \omega_i / \text{area}_i$ [parcels/km²] — in Stokkink, $n_j$ = number of stops in zone $j$ | Computable from `df_grids.csv` |
 
 > **BHH interpretation (Stokkink eq. 15–17):** the total intra-zone tour length to serve $n_j$ customers in a zone of area $A_j$ is $L_j = k\sqrt{A_j \cdot n_j}$, with $k \approx 0.57$ (empirical constant). The line-haul component (round trip between locker $i$ and zone $j$) is $h_{ij} = 2\,t_{ij}\,m_j$, where $t_{ij}$ is the centroid-to-centroid distance and $m_j$ the number of tours. Total cost: $c_{ij} = \rho\,(h_{ij} + L_j)$ with $\rho$ = cost per km.

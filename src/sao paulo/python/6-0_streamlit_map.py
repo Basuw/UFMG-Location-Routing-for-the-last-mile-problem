@@ -30,7 +30,8 @@ Input files (all produced by 6-1 / 6-2 / 6-3):
     results/mnl_oa_lockers_P{P}.csv          OA open lockers
     results/mnl_sensitivity_P.csv            sensitivity vs. P
     results/utils/zone_demand.csv            zone metadata
-    results/utils/solve_times.csv            runtime log
+    results/utils/solve_times.csv            runtime log (MNL methods)
+    results/utils/solve_times_lr.csv         runtime log (LRP-MNL)
     results/utils/df_clients_grids.csv       zone centroids
     data/data.xlsx  sheet "candidates"       locker locations
 """
@@ -58,6 +59,15 @@ RESULT_PATTERNS = {
     "Exact MILP":         ("mnl_location_results",  "mnl_location_lockers"),
     "Greedy":             ("mnl_greedy_results",    "mnl_greedy_lockers"),
     "OA (Outer Approx.)": ("mnl_oa_results",        "mnl_oa_lockers"),
+    "LRP-MNL":            ("lr_results",            "lr_lockers"),
+}
+
+# Colour per method (used in chart + highlight)
+METHOD_COLOURS = {
+    "Exact MILP":         "#c0392b",   # red
+    "Greedy":             "#27ae60",   # green
+    "OA (Outer Approx.)": "#2980b9",   # blue
+    "LRP-MNL":            "#8e44ad",   # purple
 }
 
 # ---------------------------------------------------------------------------
@@ -140,8 +150,15 @@ def load_sensitivity() -> pd.DataFrame | None:
 
 @st.cache_data
 def load_solve_times() -> pd.DataFrame | None:
-    path = RESULTS_UTIL / "solve_times.csv"
-    return pd.read_csv(path) if path.exists() else None
+    """Merge MNL solve times (6-2/6-3) + LRP solve times (6-4) into one table."""
+    frames = []
+    for fname in ("solve_times.csv", "solve_times_lr.csv"):
+        p = RESULTS_UTIL / fname
+        if p.exists():
+            frames.append(pd.read_csv(p))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 
 @st.cache_data
@@ -264,10 +281,15 @@ if solve_times is not None and selected_method and selected_p is not None:
         if "[" in _detail:
             _stop = _detail.split("[")[1].rstrip("]")
             _info_parts.append(f"**Stop:** {_stop}")
+        # Show routing cost objective for LRP-MNL
+        if selected_method == "LRP-MNL" and "objective" in _st_row.columns:
+            _obj = _st_row["objective"].values[0]
+            if pd.notna(_obj):
+                _info_parts.append(f"**Routing cost:** {_obj:,.0f}")
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:
-    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)"] if m != selected_method]
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL"] if m != selected_method]
     _cur_set = set(open_locker_ids)
     _diff_flags = []
     for _om in _other_methods:
@@ -337,12 +359,7 @@ if solve_times is not None and not solve_times.empty:
     with tab_right:
         st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
-            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP"]
-            colours = {
-                "Exact MILP":         "#c0392b",
-                "Greedy":             "#27ae60",
-                "OA (Outer Approx.)": "#2980b9",
-            }
+            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL"]
             fig_trend = go.Figure()
             for meth in methods_order:
                 df_m = (
@@ -361,8 +378,8 @@ if solve_times is not None and not solve_times.empty:
                     y=y_vals,
                     mode="lines+markers",
                     name=meth,
-                    line=dict(color=colours.get(meth, "#888"), width=2),
-                    marker=dict(size=marker_sizes, color=colours.get(meth, "#888")),
+                    line=dict(color=METHOD_COLOURS.get(meth, "#888"), width=2),
+                    marker=dict(size=marker_sizes, color=METHOD_COLOURS.get(meth, "#888")),
                     customdata=df_m["solve_time_s"].values,
                     hovertemplate=(
                         f"<b>{meth}</b><br>"
@@ -399,7 +416,7 @@ if solve_times is not None and not solve_times.empty:
     # ── Locker comparison across methods for selected P ───────────────────
     st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
     _locker_rows = []
-    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)"]:
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL"]:
         _lpath = lockers_path(_m, selected_p)
         if _lpath.exists():
             _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())
@@ -564,6 +581,30 @@ with table_col:
         height=500,
         use_container_width=True,
     )
+
+# ---------------------------------------------------------------------------
+# Fleet size (LRP-MNL only)
+# ---------------------------------------------------------------------------
+if selected_method == "LRP-MNL" and selected_p is not None:
+    fleet_path = RESULTS_OUT / f"lr_fleet_P{selected_p}.csv"
+    if fleet_path.exists():
+        st.markdown("---")
+        st.subheader("🚚 Fleet sizes — LRP-MNL")
+        fleet_df = pd.read_csv(fleet_path)
+        # Merge with capacity from candidates table for comparison
+        fleet_disp = fleet_df.merge(
+            candidates[["candidate_id", "capacity"]],
+            on="candidate_id", how="left"
+        ).rename(columns={
+            "candidate_id": "Locker",
+            "fleet_size":   "Vehicles assigned",
+            "capacity":     "Daily capacity (parcels)",
+        })
+        st.dataframe(fleet_disp, use_container_width=True, hide_index=True)
+        st.caption(
+            "fleet_size = number of couriers/vehicles assigned to this locker "
+            f"(Q = {50} parcels/vehicle — adjust Q_CAPACITY in 6-4_location_routing.py)"
+        )
 
 # ---------------------------------------------------------------------------
 # Sensitivity chart

@@ -269,11 +269,15 @@ model.setObjective(
 )
 
 # ── Charnes-Cooper (CC) ───────────────────────────────────────────────────────
-# Σ_k u_ik * X_ik + Z_i = 1   ∀ i
-# (outside-option utility = 1 in this formulation)
+# Derivation:  Z_i = 1 / (S_i + u0_i)  →  (S_i + u0_i) * Z_i = 1
+#   where S_i = Σ_k u_ik * y_k  and  X_ik = y_k * Z_i  (McCormick)
+#   so:  Σ_k u_ik * X_ik  +  u0_i * Z_i  =  1    ∀ i
+#
+# NOTE: u0_i ≈ 0.0115 (computed in 6-1_data_preparation, NOT equal to 1).
+# Without the u0_i coefficient, Z_i ≈ 1/u0_i ≈ 87 >> 1 → infeasible.
 for i in I:
     model.addConstr(
-        gp.quicksum(u[i, k] * X[i, k] for k in J) + Z[i] == 1,
+        gp.quicksum(u[i, k] * X[i, k] for k in J) + u0[i] * Z[i] == 1,
         name=f"CC_{i}",
     )
 
@@ -376,7 +380,8 @@ S_sol = {i: sum(u[i, j] * y[j].X for j in J) for i in I}
 rows  = []
 for i in I:
     S_i   = S_sol[i]
-    ms_i  = S_i / (S_i + 1.0) if (S_i + 1.0) > 0 else 0.0   # u0 = 1 here
+    denom = S_i + u0[i]
+    ms_i  = S_i / denom if denom > 0 else 0.0   # MNL with real u0_i
     rows.append({
         "zone_id":          i,
         "demand":           round(w[i], 2),
