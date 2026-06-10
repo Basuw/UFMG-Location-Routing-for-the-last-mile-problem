@@ -127,11 +127,8 @@ util_df  = pd.read_csv(RESULTS_UTIL / "utility_matrix.csv")
 dist_df  = pd.read_csv(RESULTS_UTIL / "df_dist_dcs.csv", index_col=0)
 grids_df = pd.read_csv(RESULTS_UTIL / "df_grids.csv", index_col=0)
 
-I       = list(zones_df["zone_id"])
-w       = dict(zip(zones_df["zone_id"], zones_df["demand"]))
-u0      = dict(zip(zones_df["zone_id"], zones_df["u0"]))
-Z_bar   = dict(zip(zones_df["zone_id"], zones_df["Z_bar"]))
-Z_under = dict(zip(zones_df["zone_id"], zones_df["Z_under"]))
+I = list(zones_df["zone_id"])
+w = dict(zip(zones_df["zone_id"], zones_df["demand"]))
 
 J = list(util_df["candidate_id"].unique())
 
@@ -142,6 +139,47 @@ u = {
 
 total_demand = sum(w.values())
 print(f"  {len(I)} zones | {len(J)} candidates | P = {P}")
+
+# ---------------------------------------------------------------------------
+# 1b. Recompute Z_bar / Z_under with u0 = 1 (formulation normalisation)
+#
+# The .md formulation writes the MNL denominator as  Σ_j u_ij*y_j + 1,
+# i.e. outside-option utility is normalised to 1 (independent of the
+# competitor calibration in 6-1_data_preparation.py).
+#
+#   Z_i  =  1 / (S_i + 1)      where S_i = Σ_j u_ij * y_j
+#
+# With exactly P lockers open:
+#   Z_bar_i   = 1 / (sum of P SMALLEST u_ij  +  1)   [max Z_i for zone i]
+#   Z_under_i = 1 / (sum of P LARGEST  u_ij  +  1)   [min Z_i for zone i]
+#
+# These stay in (0, 1] and are compatible with CC: Σ u_ik*X_ik + Z_i = 1.
+# ---------------------------------------------------------------------------
+U0_FORMULATION = 1.0   # outside-option utility per the .md (do not change)
+
+# Build utility array (|I| × |J|), rows ordered by I, cols by J
+util_pivot = (
+    util_df.pivot(index="zone_id", columns="candidate_id", values="u_ij")
+    .reindex(index=I, columns=J)
+    .fillna(0.0)
+    .values
+)  # shape (|I|, |J|)
+
+p_capped = min(P, len(J))
+util_sorted_asc  = np.sort(util_pivot, axis=1)            # smallest → largest
+util_sorted_desc = util_sorted_asc[:, ::-1]               # largest  → smallest
+
+P_min_sum = util_sorted_asc[:, :p_capped].sum(axis=1)     # shape (|I|,)
+P_max_sum = util_sorted_desc[:, :p_capped].sum(axis=1)    # shape (|I|,)
+
+Z_bar_arr   = 1.0 / (P_min_sum + U0_FORMULATION)          # ≤ 1/(0+1) = 1
+Z_under_arr = 1.0 / (P_max_sum + U0_FORMULATION)          # << 1 for high-u zones
+
+Z_bar   = dict(zip(I, Z_bar_arr))
+Z_under = dict(zip(I, Z_under_arr))
+
+print(f"  Z_bar   range : [{Z_bar_arr.min():.4f},  {Z_bar_arr.max():.4f}]")
+print(f"  Z_under range : [{Z_under_arr.min():.6f}, {Z_under_arr.max():.6f}]")
 
 # ---------------------------------------------------------------------------
 # 2. Compute zone areas and delivery density η_i
@@ -269,15 +307,14 @@ model.setObjective(
 )
 
 # ── Charnes-Cooper (CC) ───────────────────────────────────────────────────────
-# Derivation:  Z_i = 1 / (S_i + u0_i)  →  (S_i + u0_i) * Z_i = 1
-#   where S_i = Σ_k u_ik * y_k  and  X_ik = y_k * Z_i  (McCormick)
-#   so:  Σ_k u_ik * X_ik  +  u0_i * Z_i  =  1    ∀ i
-#
-# NOTE: u0_i ≈ 0.0115 (computed in 6-1_data_preparation, NOT equal to 1).
-# Without the u0_i coefficient, Z_i ≈ 1/u0_i ≈ 87 >> 1 → infeasible.
+# From the .md:  x_ij = u_ij*y_j / (Σ_k u_ik*y_k + 1)
+# Charnes-Cooper substitution:  Z_i = 1 / (S_i + 1),  X_ij = y_j * Z_i
+#   →  S_i * Z_i + Z_i = 1
+#   →  Σ_k u_ik * X_ik + Z_i = 1    ∀ i
+# (outside-option coefficient = U0_FORMULATION = 1, so it disappears from LHS)
 for i in I:
     model.addConstr(
-        gp.quicksum(u[i, k] * X[i, k] for k in J) + u0[i] * Z[i] == 1,
+        gp.quicksum(u[i, k] * X[i, k] for k in J) + Z[i] == 1,
         name=f"CC_{i}",
     )
 
@@ -311,7 +348,8 @@ model.addConstr(gp.quicksum(y[j] for j in J) == P, name="budget")
 # ---------------------------------------------------------------------------
 print("Computing greedy warm start …")
 _t_ws = time.time()
-greedy_lockers, _ = greedy_open(P, I, J, w, u, u0)
+u0_greedy = {i: U0_FORMULATION for i in I}   # outside option = 1 per .md
+greedy_lockers, _ = greedy_open(P, I, J, w, u, u0_greedy)
 print(f"  Greedy lockers in {time.time()-_t_ws:.1f}s → {greedy_lockers}")
 
 for j in J:
@@ -380,8 +418,8 @@ S_sol = {i: sum(u[i, j] * y[j].X for j in J) for i in I}
 rows  = []
 for i in I:
     S_i   = S_sol[i]
-    denom = S_i + u0[i]
-    ms_i  = S_i / denom if denom > 0 else 0.0   # MNL with real u0_i
+    denom = S_i + U0_FORMULATION   # = S_i + 1  (per .md)
+    ms_i  = S_i / denom if denom > 0 else 0.0
     rows.append({
         "zone_id":          i,
         "demand":           round(w[i], 2),

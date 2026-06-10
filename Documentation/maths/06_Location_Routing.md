@@ -135,7 +135,7 @@ $$
 
 1. **$\omega_{ij}$ in the UL objective** (term $c_{ij} x_{ij} \omega_{ij}$): typo for $\omega_i$? The subscript $j$ is not defined anywhere in the variable list.
 
-2. **$A_j$ in $c_{ij} \approx l_{ij}\sqrt{A_j \eta_i}$**: Voronoi cell area of locker $j$, or Huff model attractiveness? Both use the same letter in different parts of the formulation.
+2. **$A_j$ in $c_{ij} \approx l_{ij}\sqrt{A_j \eta_i}$**: Voronoi cell area of locker $j$, or Huff model attractiveness? Both use the same letter in different parts of the formulation. -> Its the area
 
 3. **Last term** $\sum_i \frac{\omega_i}{\sum_j u_{ij}y_j + 1}$: should it be multiplied by a unit cost (e.g. home delivery cost per parcel)? Or is it just the uncaptured share with no additional cost?
 
@@ -144,5 +144,12 @@ $$
 5. **$a_j$ and $Q$**: what do these correspond to exactly in the field data? (cost per courier per day? capacity in number of parcels per shift?)
 
 ---
+
+
+## New considerations
+
+[ ] Maybe split into another grid cell with bigger squares -> each cell represent a potential candidate for a small hub. 
+
+[ ] Consider big Hubs accross the country, we know (fixed) the capacity of the flow from the hub to the whole big grid 
 
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
