@@ -207,8 +207,9 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Map options**")
-show_closed  = st.sidebar.checkbox("Show closed candidates", value=True)
-circle_scale = st.sidebar.slider("Zone circle size", 50, 500, 150, step=25)
+show_closed    = st.sidebar.checkbox("Show closed candidates", value=True)
+show_big_hubs  = st.sidebar.checkbox("Show big hubs (57 fixed bases)", value=False)
+circle_scale   = st.sidebar.slider("Zone circle size", 50, 500, 150, step=25)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Top-N zones in table**")
@@ -478,35 +479,37 @@ with map_col:
                 ),
             ).add_to(m)
 
-    # ── Identify open vs closed candidates ───────────────────────────────
-    if open_locker_ids is not None:
-        # Read directly from the lockers file saved by 6-2 / 6-3
+    # ── Identify open lockers ─────────────────────────────────────────────
+    # LRP-MNL lockers come from the G2 grid (coords stored in the CSV).
+    # MILP / Greedy / OA lockers use data.xlsx candidate coordinates.
+    _lrp_locker_path = lockers_path(selected_method, selected_p)
+    _lrp_coords = None
+    if selected_method == "LRP-MNL" and _lrp_locker_path.exists():
+        _lrp_df = pd.read_csv(_lrp_locker_path)
+        if "centroid_lat" in _lrp_df.columns:
+            _lrp_coords = _lrp_df
+
+    if _lrp_coords is not None:
+        # G2 grid lockers: use coordinates stored in the lockers CSV
+        open_candidates = _lrp_coords.rename(columns={
+            "candidate_id": "candidate_id",
+            "centroid_lat": "Latitude",
+            "centroid_lon": "Longitude",
+        })
+        open_candidates["capacity"] = "G2 cell"
+        open_ids_set = set(open_candidates["candidate_id"].tolist())
+    elif open_locker_ids is not None:
+        # MILP / Greedy / OA: look up coordinates in data.xlsx
         open_candidates = candidates[
             candidates["candidate_id"].isin(open_locker_ids)
         ].dropna(subset=["Latitude", "Longitude"])
+        open_ids_set = set(open_candidates["candidate_id"].tolist())
         if open_candidates.empty:
             st.warning("Locker IDs don't match candidates table — check data.xlsx.")
     else:
-        # Fallback: proximity heuristic when lockers file is missing
-        candidates["score"] = 0.0
-        top_zones = results_df.nlargest(20, "S_i")
-        if show_zones and not top_zones.empty:
-            top_mapped = top_zones.merge(centroids, on="zone_id", how="inner").dropna(subset=["lat", "lon"])
-            if not top_mapped.empty:
-                ref_lat = top_mapped["lat"].values
-                ref_lon = top_mapped["lon"].values
-                candidates["score"] = candidates.apply(
-                    lambda r: 1 / (np.sqrt((ref_lat - r["Latitude"])**2 +
-                                           (ref_lon - r["Longitude"])**2).min() + 1e-6),
-                    axis=1,
-                )
-        open_candidates = (
-            candidates.nlargest(selected_p, "score")
-            if results_df["S_i"].max() > 1e-9 else candidates
-        ).dropna(subset=["Latitude", "Longitude"])
-        st.caption("⚠️ Lockers file not found — showing approximate open lockers.")
-
-    open_ids_set = set(open_candidates["candidate_id"].tolist())
+        open_candidates = pd.DataFrame(columns=["candidate_id", "Latitude", "Longitude", "capacity"])
+        open_ids_set = set()
+        st.caption("⚠️ Lockers file not found.")
 
     # ── Open lockers: green markers ───────────────────────────────────────
     for _, cand in open_candidates.iterrows():
@@ -515,15 +518,52 @@ with map_col:
             icon=folium.Icon(color="green", icon="archive", prefix="fa"),
             popup=folium.Popup(
                 f"<b>✅ {cand['candidate_id']}</b><br>"
-                f"Capacity: {cand['capacity']} parcels/day<br>"
+                f"Capacity: {cand['capacity']}<br>"
                 f"Lat: {cand['Latitude']:.4f}, Lon: {cand['Longitude']:.4f}",
                 max_width=220,
             ),
-            tooltip=cand["candidate_id"],
+            tooltip=str(cand["candidate_id"]),
         ).add_to(m)
 
-    # ── Closed candidates: grey circles ──────────────────────────────────
-    if show_closed:
+    # ── LRP-MNL: small hubs (orange markers) ─────────────────────────────
+    if selected_method == "LRP-MNL" and selected_p is not None:
+        _hub_path = RESULTS_OUT / f"lr_hubs_P{selected_p}.csv"
+        if _hub_path.exists():
+            _hub_df = pd.read_csv(_hub_path)
+            for _, h in _hub_df.iterrows():
+                folium.Marker(
+                    location=[h["centroid_lat"], h["centroid_lon"]],
+                    icon=folium.Icon(color="orange", icon="home", prefix="fa"),
+                    popup=folium.Popup(
+                        f"<b>🏪 Small hub {h['candidate_id']}</b><br>"
+                        f"Lockers served: {int(h.get('n_lockers', 0))}<br>"
+                        f"Area: {h['area_km2']:.1f} km²",
+                        max_width=220,
+                    ),
+                    tooltip=f"Hub {h['candidate_id']}",
+                ).add_to(m)
+
+    # ── Big hubs: blue markers (optional, OFF by default) ───────────────
+    if show_big_hubs:
+        for _, hub in candidates.iterrows():
+            folium.CircleMarker(
+                location=[hub["Latitude"], hub["Longitude"]],
+                radius=6,
+                color="#1a6eb5",
+                fill=True,
+                fill_color="#2980b9",
+                fill_opacity=0.5,
+                weight=1,
+                popup=folium.Popup(
+                    f"<b>Big hub: {hub['candidate_id']}</b><br>"
+                    f"Capacity: {hub['capacity']} parcels/day",
+                    max_width=200,
+                ),
+                tooltip=hub["candidate_id"],
+            ).add_to(m)
+
+    # ── Closed candidates: grey circles (non-LRP methods only) ───────────
+    if show_closed and selected_method != "LRP-MNL":
         for _, cand in candidates[
             ~candidates["candidate_id"].isin(open_ids_set)
         ].dropna(subset=["Latitude", "Longitude"]).iterrows():
@@ -544,7 +584,12 @@ with map_col:
             ).add_to(m)
 
     # ── Legend ────────────────────────────────────────────────────────────
-    m.get_root().html.add_child(folium.Element("""
+    _legend_lrp = (
+        "<br><b style='color:#111'>LRP-MNL only</b><br>"
+        "🟠 Small hub<br>🔵 Big hub (fixed)"
+        if selected_method == "LRP-MNL" else ""
+    )
+    m.get_root().html.add_child(folium.Element(f"""
     <div style="position:fixed; bottom:30px; left:30px; z-index:1000;
                 background:white; color:#333; padding:10px 14px; border-radius:8px;
                 border:1px solid #ccc; font-size:12px; line-height:1.8">
@@ -555,6 +600,7 @@ with map_col:
         <br>
         <b style="color:#111">Lockers</b><br>
         🟢 Open&nbsp;&nbsp;⚪ Closed
+        {_legend_lrp}
     </div>
     """))
 

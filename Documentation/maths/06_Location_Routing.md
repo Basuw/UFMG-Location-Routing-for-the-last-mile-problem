@@ -139,17 +139,28 @@ $$
 
 3. **Last term** $\sum_i \frac{\omega_i}{\sum_j u_{ij}y_j + 1}$: should it be multiplied by a unit cost (e.g. home delivery cost per parcel)? Or is it just the uncaptured share with no additional cost?
 
-4. **$f_j$**: uniform fixed cost for all sites, or real per-site data?
+4. **$f_j$**: uniform fixed cost for all sites, or real per-site data? -> uniform
 
-5. **$a_j$ and $Q$**: what do these correspond to exactly in the field data? (cost per courier per day? capacity in number of parcels per shift?)
+5. **$a_j$ and $Q$**: what do these correspond to exactly in the field data? (cost per courier per day? capacity in number of parcels per shift?) -> yes
 
 ---
 
 
 ## New considerations
 
-[ ] Maybe split into another grid cell with bigger squares -> each cell represent a potential candidate for a small hub. 
 
-[ ] Consider big Hubs accross the country, we know (fixed) the capacity of the flow from the hub to the whole big grid 
+
+- [ ] split into toher grid with bigger squares -> each cell represent a potential candidate for a small hub. 
+  - Current grid represent the demand for each zone
+  - new grid zone, with bigger cells (called G2) -> lockers
+  - other grid wither bigger cells than G2, (called G3) -> small hubs
+
+- [ ] Consider big Hubs accross the country, we know (fixed) the capacity of the flow from the hub to the whole big grid 
+
+- [ ] small Hubs have to be placed during the resolution
+
+- [ ] Routing 
+  - truck goes from hubs to small hubs 
+  - then bicycle, cars, ... goes from small hubs to deliver to lockers
 
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
