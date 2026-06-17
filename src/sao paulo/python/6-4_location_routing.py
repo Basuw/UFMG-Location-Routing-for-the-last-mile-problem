@@ -17,8 +17,10 @@ Why G2/G3 instead of data.xlsx candidates for lockers?
 
 Mathematical formulation (06_Location_Routing.md)
 -------------------------------------------------
-  UL min  Σ_j f_j·y_j  +  Σ_h F_h·v_h  +  Σ_j a_j·q_j
-        + Σ_i Σ_j c_ij·u_ij·X_ij·ω_i        [routing cost]
+  UL min  Σ_j f_j·y_j  +  Σ_h F_h·v_h                    [daily OpEx]
+        + Σ_j (o_j/T)·y_j  +  Σ_h (O_h/T)·v_h            [opening CapEx, amortised over T days]
+        + Σ_j a_j·q_j
+        + Σ_i Σ_j c_ij·u_ij·X_ij             [routing cost — BHH total tour, not ×ω_i]
         + COST_UNCAPTURED · Σ_i ω_i·Z_i      [uncaptured demand]
 
   s.t.
@@ -50,9 +52,12 @@ Inputs (produced by 6-1_data_preparation.py):
 
 Outputs:
   results/lr_results_P{P}.csv        per-zone market share
-  results/lr_lockers_P{P}.csv        open locker ids + coordinates
+  results/lr_lockers_P{P}.csv        open locker ids + coordinates + parent_hub
   results/lr_hubs_P{P}.csv           open small hub ids + coordinates
   results/lr_fleet_P{P}.csv          fleet sizes per locker
+  results/lr_big_hub.csv             single external big hub location
+  results/lr_grid_g2.csv             G2 locker candidate grid (cell rectangles)
+  results/lr_grid_g3.csv             G3 small-hub candidate grid (cell rectangles)
   results/utils/solve_times_lr.csv   runtime log
 """
 
@@ -87,6 +92,18 @@ G3_FACTOR  = 5     # G1 cells per side for small hub grid → ~25 km² per cell
 P          = int(os.environ.get("MNL_P",     7))   # lockers to open
 P_HUB      = int(os.environ.get("MNL_P_HUB", 3))  # small hubs to open
 
+# Output naming — lets us save the "with cost on lost market share" variant
+# (old routing×ω behaviour) side by side with the corrected one.
+#   default run  → "without cost on lost market share"  (ROUTING_WEIGHT_BY_DEMAND=0)
+#   variant run  → MNL_ROUTING_BY_DEMAND=1 LR_OUT_PREFIX=lr_old \
+#                  LR_METHOD_LABEL="LRP-MNL (with cost on lost market share)"
+#   LR_OUT_PREFIX    : filename prefix for results/lockers/hubs/fleet (default "lr")
+#   LR_METHOD_LABEL  : label written to the runtime log
+OUT_PREFIX   = os.environ.get("LR_OUT_PREFIX",   "lr")
+METHOD_LABEL = os.environ.get(
+    "LR_METHOD_LABEL", "LRP-MNL (without cost on lost market share)"
+)
+
 # MNL utility parameters
 ALPHA      = 2.0    # Huff distance-decay exponent
 # A_HUFF calibration (São Paulo parcel lockers, 2024):
@@ -118,16 +135,56 @@ MIN_DIST_KM = 0.15  # clamp to avoid u_ij → ∞ when zone centroid ≈ G2 cent
 # ---------------------------------------------------------------------------
 COST_PER_KM     = 0.70    # ρ: motorcycle operating cost [BRL/km] (fuel + wear)
 F_LOCKER        = 150.0   # locker daily rental + electricity + maintenance [BRL/day]
-F_HUB           = 800.0   # small hub: ~300 m² warehouse + 1 handler [BRL/day]
+# A small hub is a staffed micro-depot (≈300 m² rent + 2 handlers + handling
+# equipment), MUCH more expensive to open than an automated parcel locker.
+F_HUB           = 2000.0  # small hub daily cost [BRL/day]  (≈13× a locker)
 A_VEHICLE       = 200.0   # motorcycle courier: salary + fuel (fixed part) [BRL/day]
+
+# ---------------------------------------------------------------------------
+# One-time OPENING cost (CapEx) — in addition to the daily OpEx above.
+# F_LOCKER / F_HUB are recurring daily costs; OPEN_* are paid ONCE when a site
+# is opened (hardware purchase + installation / fit-out).  Because the whole
+# objective is expressed in BRL/day, the CapEx is amortised over AMORT_DAYS
+# (asset lifetime) and the resulting daily-equivalent is added to the objective:
+#       daily opening charge = OPEN_* / AMORT_DAYS .
+# Shorten AMORT_DAYS to make opening cost weigh more per day.
+# ---------------------------------------------------------------------------
+OPEN_LOCKER     = 20000.0   # one-time locker unit purchase + install [BRL]
+OPEN_HUB        = 150000.0  # one-time small-hub fit-out (racking, IT, signage) [BRL]
+AMORT_DAYS      = 730.0     # amortisation horizon [days] (≈2 operational years)
+OPEN_LOCKER_DAY = OPEN_LOCKER / AMORT_DAYS   # daily-equivalent CapEx, locker
+OPEN_HUB_DAY    = OPEN_HUB    / AMORT_DAYS   # daily-equivalent CapEx, small hub
 Q_CAPACITY      = 80.0    # realistic throughput for urban motorcycle courier [parcels/day]
-# CAP_HUB is computed dynamically after loading demand (= total_demand / P_HUB).
-# Override here only if you have real hub capacity data.
-CAP_HUB_OVERRIDE = None   # set to a float to override, None = use total_demand
+# Single external big hub: its inbound flux is a multiple of total demand.
+# Factor > 1 ⇒ the big hub can always supply the whole city ⇒ BCAP never binds.
+BIG_HUB_FLUX_FACTOR = 1.5
+# Small hub throughput: a 300 m² micro-fulfilment depot dispatching to lockers by
+# bike/car can handle ~3000 parcels/day.  With ≤ P_HUB=3 hubs this caps total
+# capacity at 9000 < total demand → HCAP is a *real* constraint that also nudges
+# lockers to spread across hubs instead of cramming a single dense block.
+CAP_HUB_OVERRIDE = 3000.0  # coherent micro-hub throughput [parcels/day]; None = total_demand
 # COST_UNCAPTURED: opportunity cost of one parcel delivered by competitor instead of locker.
 # Home delivery SP (Loggi/Flash): R$10–15/parcel → use R$20 to incentivize capture
 # up to breakeven distance of ~4.5 km.  Ask professor for authoritative C0 value.
 COST_UNCAPTURED = 20.0    # [BRL·√(parcel) "equivalent" per uncaptured parcel unit]
+
+# ---------------------------------------------------------------------------
+# Routing weighting — HYPOTHESIS / FIX (lockers clustering at the periphery)
+# ---------------------------------------------------------------------------
+# The BHH cost  c_ij = ρ·l_ij·√(A_j·η_i)  is ALREADY a *total* tour cost for the
+# zone, because √(A_j·η_i) ≈ √(number of parcels in the cell).  Multiplying it a
+# second time by ω_i in the objective double-counts demand: the routing penalty
+# to fully serve a zone then scales as ω_i^1.5 while the capture reward
+# (COST_UNCAPTURED·ω_i) is only linear in ω_i.  Dense central zones therefore look
+# "too expensive to serve", so the optimiser parks the P lockers in low-density
+# cells at the city edge (observed: all lockers at the northern extremity, far
+# from the demand-weighted centroid) and market share even DROPS as P grows.
+#
+# Correct BHH reading: weight the routing term by the captured *share* only
+# (c_ij·x_ij), NOT by ω_i.  Then routing ∝ √ω_i and reward ∝ ω_i, so dense demand
+# becomes attractive and lockers move onto the demand.  Set MNL_ROUTING_BY_DEMAND=1
+# to restore the old (double-counted) behaviour that clustered lockers at the edge.
+ROUTING_WEIGHT_BY_DEMAND = os.environ.get("MNL_ROUTING_BY_DEMAND", "0") == "1"
 
 # Solver
 MIP_GAP           = 0.05
@@ -276,26 +333,32 @@ print(f"  G3 hub   candidates  : {len(H)} cells  "
 
 
 # ===========================================================================
-# 3. Big hub capacity (fixed, from data.xlsx)
+# 3. Big hub (single, external, fixed)
 # ===========================================================================
-print("\n[3] Loading big hub capacity …")
-try:
-    hubs_df = pd.read_excel(DATA_XLSX, sheet_name="candidates")[
-        ["Nome",
-         "Capacidade diária para operação de couriers (remessas)",
-         "Custo diário para a operação de couriers",
-         "Custo por remessa despachada por courier"]
-    ].rename(columns={
-        "Nome": "hub_id",
-        "Capacidade diária para operação de couriers (remessas)": "capacity",
-        "Custo diário para a operação de couriers":               "daily_cost",
-        "Custo por remessa despachada por courier":               "cost_per_parcel",
-    })
-    CAP_BIG_HUB = float(hubs_df["capacity"].sum())
-    print(f"  {len(hubs_df)} big hubs  |  total capacity = {CAP_BIG_HUB:,.0f} parcels/day")
-except Exception as exc:
-    CAP_BIG_HUB = total_demand * 10
-    print(f"  WARNING: could not load big hubs ({exc}) → BCAP disabled")
+# We model ONE big hub placed arbitrarily outside the demand area.  It is
+# assumed to receive a known inbound flux that exceeds the city's total
+# demand, so the big hub never limits how much we can capture (BCAP is
+# non-binding by construction).  We only optimise the location of the small
+# hubs and lockers inside the city; the big hub is a fixed upstream source.
+print("\n[3] Placing single external big hub …")
+
+CAP_BIG_HUB = total_demand * BIG_HUB_FLUX_FACTOR   # flux > total demand ⇒ BCAP slack
+
+# Arbitrary location: just north of the demand bounding box, centred E–W.
+_bb_min_lat = float(grids_raw["minLat"].min())
+_bb_max_lat = float(grids_raw["maxLat"].max())
+_bb_min_lon = float(grids_raw["minLong"].min())
+_bb_max_lon = float(grids_raw["maxLong"].max())
+_margin_lat = 0.10 * (_bb_max_lat - _bb_min_lat)
+big_hub = {
+    "hub_id":   "BIG_HUB",
+    "lat":      _bb_max_lat + _margin_lat,        # outside (north of) the zone
+    "lon":      (_bb_min_lon + _bb_max_lon) / 2,  # centred east–west
+    "capacity": CAP_BIG_HUB,
+}
+print(f"  1 big hub @ ({big_hub['lat']:.4f}, {big_hub['lon']:.4f}) — external")
+print(f"  flux = {CAP_BIG_HUB:,.0f} parcels/day "
+      f"(= {BIG_HUB_FLUX_FACTOR:g}× total demand → BCAP non-binding)")
 
 # Small hub capacity: each hub handles its share of the big hub flow.
 # Default = total_demand (no individual hub limit; BCAP is the binding constraint).
@@ -303,6 +366,11 @@ except Exception as exc:
 CAP_HUB = float(CAP_HUB_OVERRIDE) if CAP_HUB_OVERRIDE is not None else total_demand
 print(f"  Small hub capacity (CAP_HUB) = {CAP_HUB:,.0f} parcels/day "
       f"({'override' if CAP_HUB_OVERRIDE else 'default = total demand'})")
+
+print(f"  Costs — locker: {F_LOCKER:.0f} BRL/day OpEx + {OPEN_LOCKER:,.0f} BRL CapEx "
+      f"(→ {OPEN_LOCKER_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
+print(f"  Costs — hub   : {F_HUB:.0f} BRL/day OpEx + {OPEN_HUB:,.0f} BRL CapEx "
+      f"(→ {OPEN_HUB_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
 
 
 # ===========================================================================
@@ -406,10 +474,17 @@ for i in I:
 
 # ── Objective ─────────────────────────────────────────────────────────────────
 model.setObjective(
+    # Daily OpEx (recurring) ────────────────────────────────────────────────
     gp.quicksum(F_LOCKER * y[j] for j in J)
     + gp.quicksum(F_HUB * v[h] for h in H)
+    # One-time opening CapEx, amortised to a daily charge ───────────────────
+    + gp.quicksum(OPEN_LOCKER_DAY * y[j] for j in J)
+    + gp.quicksum(OPEN_HUB_DAY * v[h] for h in H)
     + gp.quicksum(A_VEHICLE * q[j] for j in J)
-    + gp.quicksum(c[i, j] * u[i, j] * X[i, j] * w[i]
+    # Routing: weight by captured share x_ij = u_ij·X_ij only (correct BHH).
+    # The extra ·w[i] (ROUTING_WEIGHT_BY_DEMAND=True) double-counts demand — see
+    # the "Routing weighting" hypothesis block above.
+    + gp.quicksum(c[i, j] * u[i, j] * X[i, j] * (w[i] if ROUTING_WEIGHT_BY_DEMAND else 1.0)
                   for i in I for j in close_J[i])
     + gp.quicksum(COST_UNCAPTURED * w[i] * Z[i] for i in I),
     GRB.MINIMIZE,
@@ -570,6 +645,11 @@ fleet        = {j: int(round(q[j].X)) for j in open_lockers}
 mip_gap      = model.MIPGap
 obj_val      = model.ObjVal
 
+# Cost breakdown of the chosen solution
+capex_total = len(open_lockers) * OPEN_LOCKER + len(open_hubs) * OPEN_HUB
+opex_daily  = len(open_lockers) * F_LOCKER + len(open_hubs) * F_HUB
+open_daily  = len(open_lockers) * OPEN_LOCKER_DAY + len(open_hubs) * OPEN_HUB_DAY
+
 print("\n" + "=" * 60)
 print(f"Stop        : {stop_reason}")
 print(f"MIP Gap     : {mip_gap:.2%}")
@@ -578,6 +658,10 @@ print(f"Solve time  : {_t_elapsed:.0f}s")
 print(f"Open lockers ({len(open_lockers)}) : {open_lockers}")
 print(f"Open hubs   ({len(open_hubs)}) : {open_hubs}")
 print(f"Fleet       : {fleet}")
+print(f"Opening CapEx (one-time) : {capex_total:,.0f} BRL "
+      f"({len(open_lockers)}×{OPEN_LOCKER:,.0f} + {len(open_hubs)}×{OPEN_HUB:,.0f})")
+print(f"Fixed daily : {opex_daily:,.0f} OpEx + {open_daily:,.0f} amortised CapEx "
+      f"= {opex_daily + open_daily:,.0f} BRL/day")
 print("=" * 60)
 
 # ── Market share (MNL with u0 = 1) ────────────────────────────────────────────
@@ -608,19 +692,20 @@ print(df_results.head(10).to_string(index=False))
 # ===========================================================================
 RESULTS_OUT.mkdir(parents=True, exist_ok=True)
 
-df_results.to_csv(RESULTS_OUT / f"lr_results_P{P}.csv", index=False)
+df_results.to_csv(RESULTS_OUT / f"{OUT_PREFIX}_results_P{P}.csv", index=False)
 
-# Lockers: include coordinates for Streamlit display
+# Lockers: include coordinates + parent hub (for routing display in Streamlit)
 locker_coords = pd.DataFrame([
     {
         "candidate_id":  j,
         "centroid_lat":  g2_meta.loc[j, "centroid_lat"],
         "centroid_lon":  g2_meta.loc[j, "centroid_lon"],
         "area_km2":      g2_meta.loc[j, "area_km2"],
+        "parent_hub":    g2_to_g3.get(j),
     }
     for j in open_lockers
 ])
-locker_coords.to_csv(RESULTS_OUT / f"lr_lockers_P{P}.csv", index=False)
+locker_coords.to_csv(RESULTS_OUT / f"{OUT_PREFIX}_lockers_P{P}.csv", index=False)
 
 # Hubs: include coordinates
 hub_coords = pd.DataFrame([
@@ -633,28 +718,59 @@ hub_coords = pd.DataFrame([
     }
     for h in open_hubs
 ])
-hub_coords.to_csv(RESULTS_OUT / f"lr_hubs_P{P}.csv", index=False)
+hub_coords.to_csv(RESULTS_OUT / f"{OUT_PREFIX}_hubs_P{P}.csv", index=False)
 
 pd.DataFrame(
     [{"candidate_id": j, "fleet_size": fleet[j]} for j in open_lockers]
-).to_csv(RESULTS_OUT / f"lr_fleet_P{P}.csv", index=False)
+).to_csv(RESULTS_OUT / f"{OUT_PREFIX}_fleet_P{P}.csv", index=False)
+
+# Single external big hub location (for the map) — does not depend on P.
+pd.DataFrame([{
+    "hub_id":   big_hub["hub_id"],
+    "lat":      big_hub["lat"],
+    "lon":      big_hub["lon"],
+    "capacity": big_hub["capacity"],
+}]).to_csv(RESULTS_OUT / "lr_big_hub.csv", index=False)
+
+# Candidate grids (cell rectangles) for the map overlay — independent of P.
+#   G2 = locker candidate grid, G3 = small-hub candidate grid.
+g2_df.to_csv(RESULTS_OUT / "lr_grid_g2.csv", index=False)
+g3_df.to_csv(RESULTS_OUT / "lr_grid_g3.csv", index=False)
+
+# Cost parameters — single source of truth for the Streamlit cost panel.
+pd.DataFrame([{
+    "F_LOCKER":        F_LOCKER,
+    "F_HUB":           F_HUB,
+    "A_VEHICLE":       A_VEHICLE,
+    "OPEN_LOCKER":     OPEN_LOCKER,
+    "OPEN_HUB":        OPEN_HUB,
+    "AMORT_DAYS":      AMORT_DAYS,
+    "OPEN_LOCKER_DAY": OPEN_LOCKER_DAY,
+    "OPEN_HUB_DAY":    OPEN_HUB_DAY,
+    "COST_UNCAPTURED": COST_UNCAPTURED,
+    "COST_PER_KM":     COST_PER_KM,
+    "Q_CAPACITY":      Q_CAPACITY,
+    "CAP_HUB":         CAP_HUB,
+}]).to_csv(RESULTS_OUT / "lr_cost_params.csv", index=False)
 
 # Runtime log
 _log = RESULTS_UTIL / "solve_times_lr.csv"
 _new = pd.DataFrame([{
-    "method":           "LRP-MNL",
+    "method":           METHOD_LABEL,
     "P":                P,
     "P_hub":            P_HUB,
     "solve_time_s":     round(_t_elapsed, 2),
     "objective":        round(obj_val, 2),
     "market_share_pct": round(total_captured / total_demand * 100, 3),
-    "detail":           f"gap={mip_gap:.2%}  [{stop_reason}]",
+    "capex_brl":        round(capex_total, 0),
+    "detail":           f"gap={mip_gap:.2%}  [{stop_reason}]  CapEx={capex_total:,.0f}",
 }])
 if _log.exists():
     _ex = pd.read_csv(_log)
-    _ex = _ex[~((_ex["method"] == "LRP-MNL") & (_ex["P"] == P))]
+    _ex = _ex[~((_ex["method"] == METHOD_LABEL) & (_ex["P"] == P))]
     _new = pd.concat([_ex, _new], ignore_index=True)
 _new.to_csv(_log, index=False)
 
-print(f"\nSaved → {RESULTS_OUT}  (lr_results, lr_lockers, lr_hubs, lr_fleet)")
+print(f"\nSaved → {RESULTS_OUT}  (lr_results, lr_lockers, lr_hubs, lr_fleet, "
+      f"lr_big_hub, lr_grid_g2/g3)")
 print(f"Runtime log → {_log}")

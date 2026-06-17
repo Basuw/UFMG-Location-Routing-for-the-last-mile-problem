@@ -59,7 +59,8 @@ RESULT_PATTERNS = {
     "Exact MILP":         ("mnl_location_results",  "mnl_location_lockers"),
     "Greedy":             ("mnl_greedy_results",    "mnl_greedy_lockers"),
     "OA (Outer Approx.)": ("mnl_oa_results",        "mnl_oa_lockers"),
-    "LRP-MNL":            ("lr_results",            "lr_lockers"),
+    "LRP-MNL (without cost on lost market share)": ("lr_results",     "lr_lockers"),
+    "LRP-MNL (with cost on lost market share)":    ("lr_old_results", "lr_old_lockers"),
 }
 
 # Colour per method (used in chart + highlight)
@@ -67,7 +68,8 @@ METHOD_COLOURS = {
     "Exact MILP":         "#c0392b",   # red
     "Greedy":             "#27ae60",   # green
     "OA (Outer Approx.)": "#2980b9",   # blue
-    "LRP-MNL":            "#8e44ad",   # purple
+    "LRP-MNL (without cost on lost market share)": "#8e44ad",   # purple (corrected)
+    "LRP-MNL (with cost on lost market share)":    "#b5651d",   # brown (routing×ω, clusters)
 }
 
 # ---------------------------------------------------------------------------
@@ -169,6 +171,41 @@ def load_open_lockers(method_key: str, p: int) -> list[str] | None:
     return pd.read_csv(path)["candidate_id"].tolist()
 
 
+@st.cache_data
+def load_lr_big_hub() -> pd.DataFrame | None:
+    """Single external big hub (LRP-MNL) — produced by 6-4_location_routing.py."""
+    path = RESULTS_OUT / "lr_big_hub.csv"
+    return pd.read_csv(path) if path.exists() else None
+
+
+@st.cache_data
+def load_cost_params() -> dict | None:
+    """LRP-MNL cost constants exported by 6-4 (single source of truth)."""
+    path = RESULTS_OUT / "lr_cost_params.csv"
+    if not path.exists():
+        return None
+    return pd.read_csv(path).iloc[0].to_dict()
+
+
+@st.cache_data
+def load_lr_grid(name: str) -> pd.DataFrame | None:
+    """G2 (locker) / G3 (small hub) candidate grid rectangles."""
+    path = RESULTS_OUT / f"lr_grid_{name}.csv"
+    return pd.read_csv(path) if path.exists() else None
+
+
+@st.cache_data
+def load_g1_grid() -> pd.DataFrame:
+    """G1 demand grid (all cells) from df_grids.csv."""
+    path = RESULTS_UTIL / "df_grids.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    if "id" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "id"})
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Colour helper
 # ---------------------------------------------------------------------------
@@ -211,6 +248,15 @@ show_closed    = st.sidebar.checkbox("Show closed candidates", value=True)
 show_big_hubs  = st.sidebar.checkbox("Show big hubs (57 fixed bases)", value=False)
 circle_scale   = st.sidebar.slider("Zone circle size", 50, 500, 150, step=25)
 
+st.sidebar.markdown("**Grids overlay**")
+show_g1   = st.sidebar.checkbox("G1 demand grid (~1 km²)", value=False)
+show_g2   = st.sidebar.checkbox("G2 locker grid (~9 km²)", value=False)
+show_g3   = st.sidebar.checkbox("G3 small-hub grid (~25 km²)", value=False)
+
+st.sidebar.markdown("**Location routing** *(LRP-MNL)*")
+show_routing  = st.sidebar.checkbox("Show routing network", value=True)
+show_big_hub  = st.sidebar.checkbox("Show external big hub", value=True)
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Top-N zones in table**")
 top_n = st.sidebar.slider("N", 5, 50, 15)
@@ -222,6 +268,19 @@ candidates      = load_candidates()
 centroids       = load_zone_centroids()
 sensitivity     = load_sensitivity()
 solve_times     = load_solve_times()
+big_hub_df      = load_lr_big_hub()
+g1_grid         = load_g1_grid()
+g2_grid         = load_lr_grid("g2")
+g3_grid         = load_lr_grid("g3")
+cost_params     = load_cost_params()
+
+# LRP family helpers: any method whose key starts with "LRP" is an LRP variant.
+# lr_base is the filename prefix for its hubs/fleet files (e.g. "lr" or "lr_old").
+is_lrp = bool(selected_method) and selected_method.startswith("LRP")
+lr_base = (
+    RESULT_PATTERNS[selected_method][1].rsplit("_lockers", 1)[0]
+    if is_lrp else "lr"
+)
 results_df      = (
     load_results(result_path(selected_method, selected_p))
     if selected_method and selected_p is not None else None
@@ -267,6 +326,66 @@ col2.metric("Captured demand",      f"{total_captured:,.0f} parcels")
 col3.metric("Overall market share", f"{overall_share:.1%}")
 col4.metric("Open lockers",         str(len(open_locker_ids)) if open_locker_ids else f"P={selected_p}")
 
+# ── Cost panel (LRP-MNL only) ──────────────────────────────────────────────────
+# Breakdown is reconstructed from the saved solution + the cost constants
+# exported by 6-4 (lr_cost_params.csv).  Routing is the residual of the daily
+# objective so the four daily terms always sum to the optimiser's objective.
+if is_lrp and cost_params is not None and selected_p is not None:
+    cp = cost_params
+    n_lockers = len(open_locker_ids) if open_locker_ids else 0
+
+    _hub_p   = RESULTS_OUT / f"{lr_base}_hubs_P{selected_p}.csv"
+    _fleet_p = RESULTS_OUT / f"{lr_base}_fleet_P{selected_p}.csv"
+    n_hubs      = len(pd.read_csv(_hub_p))   if _hub_p.exists()   else 0
+    total_fleet = int(pd.read_csv(_fleet_p)["fleet_size"].sum()) if _fleet_p.exists() else 0
+
+    # One-time opening CapEx
+    capex_total = n_lockers * cp["OPEN_LOCKER"] + n_hubs * cp["OPEN_HUB"]
+    # Daily terms
+    opex_daily    = n_lockers * cp["F_LOCKER"]        + n_hubs * cp["F_HUB"]
+    capex_daily   = n_lockers * cp["OPEN_LOCKER_DAY"] + n_hubs * cp["OPEN_HUB_DAY"]
+    vehicle_daily = cp["A_VEHICLE"] * total_fleet
+    uncaptured_daily = cp["COST_UNCAPTURED"] * (total_demand - total_captured)
+
+    # Daily objective from the runtime log (sum of all daily terms)
+    _obj = None
+    if solve_times is not None:
+        _row = solve_times[(solve_times["method"] == selected_method) & (solve_times["P"] == selected_p)]
+        if not _row.empty and "objective" in _row.columns:
+            _obj = float(_row["objective"].values[0])
+    routing_daily = (
+        _obj - opex_daily - capex_daily - vehicle_daily - uncaptured_daily
+        if _obj is not None else None
+    )
+    daily_total = _obj if _obj is not None else (
+        opex_daily + capex_daily + vehicle_daily + uncaptured_daily
+    )
+
+    st.markdown("##### 💰 Costs")
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("Opening CapEx (one-time)", f"{capex_total:,.0f} BRL",
+               help=f"{n_lockers} lockers × {cp['OPEN_LOCKER']:,.0f} + "
+                    f"{n_hubs} hubs × {cp['OPEN_HUB']:,.0f}")
+    cc2.metric("Fixed cost / day", f"{opex_daily + capex_daily:,.0f} BRL",
+               help=f"OpEx {opex_daily:,.0f} + amortised CapEx {capex_daily:,.0f} "
+                    f"(over {cp['AMORT_DAYS']:.0f} days)")
+    cc3.metric("Fleet cost / day", f"{vehicle_daily:,.0f} BRL",
+               help=f"{total_fleet} vehicles × {cp['A_VEHICLE']:,.0f} BRL/day")
+    cc4.metric("Total daily cost", f"{daily_total:,.0f} BRL",
+               help="Optimiser objective (fixed + fleet + routing + uncaptured penalty)")
+
+    if routing_daily is not None:
+        st.caption(
+            f"Daily breakdown — "
+            f"fixed: **{opex_daily + capex_daily:,.0f}**  ·  "
+            f"fleet: **{vehicle_daily:,.0f}**  ·  "
+            f"routing: **{max(routing_daily, 0):,.0f}**  ·  "
+            f"uncaptured penalty: **{uncaptured_daily:,.0f}**  =  "
+            f"**{daily_total:,.0f} BRL/day**  "
+            f"(lockers {cp['F_LOCKER']:.0f}/day + {cp['OPEN_LOCKER']:,.0f} CapEx; "
+            f"hubs {cp['F_HUB']:.0f}/day + {cp['OPEN_HUB']:,.0f} CapEx)"
+        )
+
 # ── Method info bar ───────────────────────────────────────────────────────────
 # Show MIP gap for Exact MILP, and whether this method's lockers differ
 _info_parts = []
@@ -279,18 +398,18 @@ if solve_times is not None and selected_method and selected_p is not None:
         if "gap=" in _detail:
             _gap_str = _detail.split("gap=")[1].split()[0].rstrip(",")
             _info_parts.append(f"**MIP gap:** {_gap_str}")
-        if "[" in _detail:
-            _stop = _detail.split("[")[1].rstrip("]")
+        if "[" in _detail and "]" in _detail:
+            _stop = _detail.split("[")[1].split("]")[0]
             _info_parts.append(f"**Stop:** {_stop}")
-        # Show routing cost objective for LRP-MNL
-        if selected_method == "LRP-MNL" and "objective" in _st_row.columns:
+        # Show total daily objective for LRP variants (breakdown is in the cost panel)
+        if is_lrp and "objective" in _st_row.columns:
             _obj = _st_row["objective"].values[0]
             if pd.notna(_obj):
-                _info_parts.append(f"**Routing cost:** {_obj:,.0f}")
+                _info_parts.append(f"**Total daily cost:** {_obj:,.0f} BRL")
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:
-    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL"] if m != selected_method]
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"] if m != selected_method]
     _cur_set = set(open_locker_ids)
     _diff_flags = []
     for _om in _other_methods:
@@ -360,7 +479,7 @@ if solve_times is not None and not solve_times.empty:
     with tab_right:
         st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
-            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL"]
+            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"]
             fig_trend = go.Figure()
             for meth in methods_order:
                 df_m = (
@@ -417,7 +536,7 @@ if solve_times is not None and not solve_times.empty:
     # ── Locker comparison across methods for selected P ───────────────────
     st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
     _locker_rows = []
-    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL"]:
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"]:
         _lpath = lockers_path(_m, selected_p)
         if _lpath.exists():
             _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())
@@ -458,6 +577,64 @@ with map_col:
 
     max_share = results_df["market_share_pct"].max() if not results_df.empty else 1.0
 
+    # ── Grid overlays (drawn first → underneath markers) ──────────────────
+    def _draw_grid(df: pd.DataFrame, colour: str, weight: float, ids=None):
+        if df is None or df.empty:
+            return
+        rows = df if ids is None else df[df["id"].isin(ids)]
+        for _, r in rows.iterrows():
+            folium.Rectangle(
+                bounds=[[r["minLat"], r["minLong"]], [r["maxLat"], r["maxLong"]]],
+                color=colour, weight=weight, fill=False, opacity=0.55,
+            ).add_to(m)
+
+    if show_g1 and not g1_grid.empty:
+        # Limit to demand zones to keep the map responsive
+        _demand_ids = set(results_df["zone_id"].tolist())
+        _draw_grid(g1_grid, "#9aa0a6", 0.4, ids=_demand_ids)
+    if show_g2:
+        _draw_grid(g2_grid, "#8e44ad", 0.8)
+    if show_g3:
+        _draw_grid(g3_grid, "#d35400", 1.2)
+
+    # ── Location-routing network (LRP-MNL) ────────────────────────────────
+    # 2-echelon flow:  big hub → small hubs (truck)  →  lockers (bike/car).
+    # Drawn before markers so the lines sit underneath the icons.
+    _routing_drawn = False
+    if is_lrp and show_routing and selected_p is not None:
+        _hub_path    = RESULTS_OUT / f"{lr_base}_hubs_P{selected_p}.csv"
+        _locker_path = RESULTS_OUT / f"{lr_base}_lockers_P{selected_p}.csv"
+        if _hub_path.exists() and _locker_path.exists():
+            _hubs_r    = pd.read_csv(_hub_path)
+            _lockers_r = pd.read_csv(_locker_path)
+            _hub_xy = {
+                r["candidate_id"]: (r["centroid_lat"], r["centroid_lon"])
+                for _, r in _hubs_r.iterrows()
+            }
+            # First echelon: external big hub → each small hub (truck legs)
+            if big_hub_df is not None and not big_hub_df.empty:
+                _bh = big_hub_df.iloc[0]
+                for _, h in _hubs_r.iterrows():
+                    folium.PolyLine(
+                        [[_bh["lat"], _bh["lon"]],
+                         [h["centroid_lat"], h["centroid_lon"]]],
+                        color="#1a1a1a", weight=3, opacity=0.65,
+                        dash_array="10",
+                        tooltip=f"Truck: BIG_HUB → {h['candidate_id']}",
+                    ).add_to(m)
+            # Second echelon: small hub → its lockers (last-mile legs)
+            if "parent_hub" in _lockers_r.columns:
+                for _, l in _lockers_r.iterrows():
+                    parent = l["parent_hub"]
+                    if parent in _hub_xy:
+                        folium.PolyLine(
+                            [[_hub_xy[parent][0], _hub_xy[parent][1]],
+                             [l["centroid_lat"], l["centroid_lon"]]],
+                            color="#8e44ad", weight=2, opacity=0.7,
+                            tooltip=f"{parent} → {l['candidate_id']}",
+                        ).add_to(m)
+            _routing_drawn = True
+
     # ── Zones: coloured circles ───────────────────────────────────────────
     if show_zones:
         for _, row in results_mapped.dropna(subset=["lat", "lon"]).iterrows():
@@ -484,7 +661,7 @@ with map_col:
     # MILP / Greedy / OA lockers use data.xlsx candidate coordinates.
     _lrp_locker_path = lockers_path(selected_method, selected_p)
     _lrp_coords = None
-    if selected_method == "LRP-MNL" and _lrp_locker_path.exists():
+    if is_lrp and _lrp_locker_path.exists():
         _lrp_df = pd.read_csv(_lrp_locker_path)
         if "centroid_lat" in _lrp_df.columns:
             _lrp_coords = _lrp_df
@@ -526,8 +703,8 @@ with map_col:
         ).add_to(m)
 
     # ── LRP-MNL: small hubs (orange markers) ─────────────────────────────
-    if selected_method == "LRP-MNL" and selected_p is not None:
-        _hub_path = RESULTS_OUT / f"lr_hubs_P{selected_p}.csv"
+    if is_lrp and selected_p is not None:
+        _hub_path = RESULTS_OUT / f"{lr_base}_hubs_P{selected_p}.csv"
         if _hub_path.exists():
             _hub_df = pd.read_csv(_hub_path)
             for _, h in _hub_df.iterrows():
@@ -542,6 +719,23 @@ with map_col:
                     ),
                     tooltip=f"Hub {h['candidate_id']}",
                 ).add_to(m)
+
+    # ── LRP-MNL: single external big hub (blue truck marker) ─────────────
+    if (is_lrp and show_big_hub
+            and big_hub_df is not None and not big_hub_df.empty):
+        _bh = big_hub_df.iloc[0]
+        folium.Marker(
+            location=[_bh["lat"], _bh["lon"]],
+            icon=folium.Icon(color="blue", icon="industry", prefix="fa"),
+            popup=folium.Popup(
+                f"<b>🔵 {_bh['hub_id']} (external)</b><br>"
+                f"Inbound flux: {_bh['capacity']:,.0f} parcels/day<br>"
+                f"Lat: {_bh['lat']:.4f}, Lon: {_bh['lon']:.4f}<br>"
+                f"<i>Fixed upstream source — placed outside the zone</i>",
+                max_width=240,
+            ),
+            tooltip=f"{_bh['hub_id']} (external big hub)",
+        ).add_to(m)
 
     # ── Big hubs: blue markers (optional, OFF by default) ───────────────
     if show_big_hubs:
@@ -563,7 +757,7 @@ with map_col:
             ).add_to(m)
 
     # ── Closed candidates: grey circles (non-LRP methods only) ───────────
-    if show_closed and selected_method != "LRP-MNL":
+    if show_closed and not is_lrp:
         for _, cand in candidates[
             ~candidates["candidate_id"].isin(open_ids_set)
         ].dropna(subset=["Latitude", "Longitude"]).iterrows():
@@ -586,9 +780,22 @@ with map_col:
     # ── Legend ────────────────────────────────────────────────────────────
     _legend_lrp = (
         "<br><b style='color:#111'>LRP-MNL only</b><br>"
-        "🟠 Small hub<br>🔵 Big hub (fixed)"
-        if selected_method == "LRP-MNL" else ""
+        "🟠 Small hub<br>🔵 External big hub<br>"
+        "<span style='color:#1a1a1a'>┄┄</span> Truck (hub→hub)<br>"
+        "<span style='color:#8e44ad'>──</span> Last-mile (hub→locker)"
+        if is_lrp else ""
     )
+    _legend_grids = ""
+    if show_g1 or show_g2 or show_g3:
+        _parts = []
+        if show_g1:
+            _parts.append("<span style='color:#9aa0a6'>▢</span> G1 demand")
+        if show_g2:
+            _parts.append("<span style='color:#8e44ad'>▢</span> G2 locker")
+        if show_g3:
+            _parts.append("<span style='color:#d35400'>▢</span> G3 hub")
+        _legend_grids = "<br><b style='color:#111'>Grids</b><br>" + "<br>".join(_parts)
+    _legend_lrp += _legend_grids
     m.get_root().html.add_child(folium.Element(f"""
     <div style="position:fixed; bottom:30px; left:30px; z-index:1000;
                 background:white; color:#333; padding:10px 14px; border-radius:8px;
@@ -603,6 +810,18 @@ with map_col:
         {_legend_lrp}
     </div>
     """))
+
+    # ── Fit bounds so the external big hub (north of the zone) stays visible ──
+    if (is_lrp and show_big_hub
+            and big_hub_df is not None and not big_hub_df.empty and show_zones):
+        _bh = big_hub_df.iloc[0]
+        _lats = results_mapped["lat"].dropna()
+        _lons = results_mapped["lon"].dropna()
+        if not _lats.empty:
+            m.fit_bounds([
+                [min(_lats.min(), _bh["lat"]), min(_lons.min(), _bh["lon"])],
+                [max(_lats.max(), _bh["lat"]), max(_lons.max(), _bh["lon"])],
+            ])
 
     st_folium(m, width=None, height=520, returned_objects=[])
 
@@ -631,11 +850,11 @@ with table_col:
 # ---------------------------------------------------------------------------
 # Fleet size (LRP-MNL only)
 # ---------------------------------------------------------------------------
-if selected_method == "LRP-MNL" and selected_p is not None:
-    fleet_path = RESULTS_OUT / f"lr_fleet_P{selected_p}.csv"
+if is_lrp and selected_p is not None:
+    fleet_path = RESULTS_OUT / f"{lr_base}_fleet_P{selected_p}.csv"
     if fleet_path.exists():
         st.markdown("---")
-        st.subheader("🚚 Fleet sizes — LRP-MNL")
+        st.subheader(f"🚚 Fleet sizes — {selected_method}")
         fleet_df = pd.read_csv(fleet_path)
         # Merge with capacity from candidates table for comparison
         fleet_disp = fleet_df.merge(
@@ -649,7 +868,7 @@ if selected_method == "LRP-MNL" and selected_p is not None:
         st.dataframe(fleet_disp, use_container_width=True, hide_index=True)
         st.caption(
             "fleet_size = number of couriers/vehicles assigned to this locker "
-            f"(Q = {50} parcels/vehicle — adjust Q_CAPACITY in 6-4_location_routing.py)"
+            f"(Q = {80} parcels/vehicle — adjust Q_CAPACITY in 6-4_location_routing.py)"
         )
 
 # ---------------------------------------------------------------------------

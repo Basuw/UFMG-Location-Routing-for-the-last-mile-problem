@@ -41,7 +41,7 @@ $$
 $$
 
 $$
-\sum_{i} \omega_{i} x_{ij} \le Qq_j \qquad \forall J
+\sum_{i} \omega_{i} x_{ij} \le Qq_j \qquad \forall j
 $$
 
 $$
@@ -49,7 +49,7 @@ x_{ij} \le y_j \qquad \forall i,j
 $$
 
 $$
-q_j \le My_j \qquad \forall J
+q_j \le My_j \qquad \forall j
 $$
 
 $$
@@ -114,7 +114,7 @@ $$
 |---|---|---|
 | $c_{ij}$ | Total delivery cost from locker $j$ to zone $i$ per unit of demand | Computed |
 | $l_{ij}$ | Distance (km) between the centroid of zone $i$ and locker $j$ — inter-zone (line-haul) component | `df_dist_dcs.csv`, column `Distance` |
-| $A_j$ |  <span style="color: red;">**⚠ AMBIGUOUS**</span> — either the **area of the Voronoi cell of locker $j$** [km²] (BHH interpretation from Stokkink), or the **intrinsic attractiveness** $A_j$ of the Huff model (same letter in the paper's `.tex` file) | <span style="color: red;">**To be clarified**</span> |
+| $A_j$ |  <span style="color: green;">**⚠ AMBIGUOUS**</span> — either the **area of the Voronoi cell of locker $j$** [km²] (BHH interpretation from Stokkink), or the **intrinsic attractiveness** $A_j$ of the Huff model (same letter in the paper's `.tex` file) | <span style="color: green;">**Its the area**</span> |
 | $\eta_i$ | Delivery density in zone $i$: $\eta_i = \omega_i / \text{area}_i$ [parcels/km²] — in Stokkink, $n_j$ = number of stops in zone $j$ | Computable from `df_grids.csv` |
 
 > **BHH interpretation (Stokkink eq. 15–17):** the total intra-zone tour length to serve $n_j$ customers in a zone of area $A_j$ is $L_j = k\sqrt{A_j \cdot n_j}$, with $k \approx 0.57$ (empirical constant). The line-haul component (round trip between locker $i$ and zone $j$) is $h_{ij} = 2\,t_{ij}\,m_j$, where $t_{ij}$ is the centroid-to-centroid distance and $m_j$ the number of tours. Total cost: $c_{ij} = \rho\,(h_{ij} + L_j)$ with $\rho$ = cost per km.
@@ -162,5 +162,88 @@ $$
 - [ ] Routing 
   - truck goes from hubs to small hubs 
   - then bicycle, cars, ... goes from small hubs to deliver to lockers
+
+---
+
+## Implementation decisions (6-4_location_routing.py)
+
+### Cost structure — daily OpEx + one-time opening CapEx
+
+Each opened site now carries **two** costs:
+
+| Site | Daily OpEx (recurring) | Opening CapEx (one-time) |
+|---|---|---|
+| Locker | $f^{\text{op}}_j$ = `F_LOCKER` = 150 BRL/day | $o_j$ = `OPEN_LOCKER` = 20 000 BRL |
+| Small hub | $F^{\text{op}}_h$ = `F_HUB` = 2 000 BRL/day | $O_h$ = `OPEN_HUB` = 150 000 BRL |
+
+The objective is expressed **per day**, so the one-time CapEx is **amortised** over a
+horizon $T$ = `AMORT_DAYS` (≈2 years = 730 days) and added as a daily-equivalent charge:
+
+$$
+\sum_{j}\Big(f^{\text{op}}_j + \tfrac{o_j}{T}\Big)y_j
+\;+\;
+\sum_{h}\Big(F^{\text{op}}_h + \tfrac{O_h}{T}\Big)v_h
+$$
+
+Opening a small hub is *largement supérieur* to a locker (≈13× the daily cost and
+≈7.5× the CapEx). The full one-time CapEx of the chosen solution is reported separately.
+
+### Routing cost — BHH double-count fix (lockers were clustering at the periphery)
+
+The BHH approximation $c_{ij}=\rho\,l_{ij}\sqrt{A_j\,\eta_i}$ is **already a total tour
+cost** for the zone, because $\sqrt{A_j\,\eta_i}\approx\sqrt{n_i}$ (number of parcels in
+the cell). Multiplying it **again** by $\omega_i$ in the objective double-counts demand:
+the penalty to serve a zone scales as $\omega_i^{1.5}$ while the capture reward
+$\text{COST\_UNCAPTURED}\cdot\omega_i$ is only linear in $\omega_i$. Dense central zones
+then look "too expensive", so the optimiser parked the lockers in low-density cells at the
+city edge (observed: all lockers at the northern extremity, market share *dropping* as $P$
+grew). **Fix:** weight the routing term by the captured share only,
+$\sum_{ij} c_{ij}\,x_{ij}$ (no extra $\omega_i$ — flag `ROUTING_WEIGHT_BY_DEMAND=False`).
+
+### Single external big hub
+
+Exactly **one** big hub, placed arbitrarily outside the demand bounding box (north,
+centred E–W). Its inbound flux is fixed at $1.5\times$ total demand, so the big-hub
+capacity constraint (BCAP) never binds — only the small hubs and lockers are optimised.
+Small-hub throughput `CAP_HUB` = 3 000 parcels/day (coherent micro-depot).
+
+---
+
+## Issues
+
+As we can see ![Map step1](../img/LR-step1.png)
+We have to add a cost of the market share we don't capture so it gives it more weight and less for the routing price so we couldn't see anymore clusters of lockers
+
+### Step 1
+
+add costs of lost market share
+no capacity for lockers
+
+### Step 2
+
+add capacity
+test for 30% of total demand,
+next 40% , ...
+
+
+### Step 3
+
+add congestion
+
+$$
+\phi(f)=
+\frac {cf}{\tau-f}
+$$
+$$
+c \rarr \text{prox cost (very small)}
+$$
+$$
+f \rarr \text{flow}
+$$
+$$
+\tau \rarr \text{capacity}
+$$
+
+clients complain when congestion is btw 70% to 80%
 
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
