@@ -60,7 +60,8 @@ RESULT_PATTERNS = {
     "Greedy":             ("mnl_greedy_results",    "mnl_greedy_lockers"),
     "OA (Outer Approx.)": ("mnl_oa_results",        "mnl_oa_lockers"),
     "LRP-MNL (without cost on lost market share)": ("lr_results",     "lr_lockers"),
-    "LRP-MNL (with cost on lost market share)":    ("lr_old_results", "lr_old_lockers"),
+    "LRP-MNL (with cost on lost market share)":    ("lr_L_results",   "lr_L_lockers"),
+    "LRP-MNL (routing cost double-counts demand)":    ("lr_old_results", "lr_old_lockers"),
 }
 
 # Colour per method (used in chart + highlight)
@@ -68,8 +69,9 @@ METHOD_COLOURS = {
     "Exact MILP":         "#c0392b",   # red
     "Greedy":             "#27ae60",   # green
     "OA (Outer Approx.)": "#2980b9",   # blue
-    "LRP-MNL (without cost on lost market share)": "#8e44ad",   # purple (corrected)
-    "LRP-MNL (with cost on lost market share)":    "#b5651d",   # brown (routing×ω, clusters)
+    "LRP-MNL (without cost on lost market share)": "#8e44ad",   # purple (routing fixed, L=1)
+    "LRP-MNL (with cost on lost market share)":    "#16a085",   # teal (+ weight L on uncaptured)
+    "LRP-MNL (routing cost double-counts demand)":    "#b5651d",   # brown (routing×ω, clusters)
 }
 
 # ---------------------------------------------------------------------------
@@ -179,9 +181,11 @@ def load_lr_big_hub() -> pd.DataFrame | None:
 
 
 @st.cache_data
-def load_cost_params() -> dict | None:
-    """LRP-MNL cost constants exported by 6-4 (single source of truth)."""
-    path = RESULTS_OUT / "lr_cost_params.csv"
+def load_cost_params(base: str = "lr") -> dict | None:
+    """LRP cost constants exported by 6-4 for a given variant prefix (e.g. lr, lr_L)."""
+    path = RESULTS_OUT / f"{base}_cost_params.csv"
+    if not path.exists():
+        path = RESULTS_OUT / "lr_cost_params.csv"   # fallback (shared defaults)
     if not path.exists():
         return None
     return pd.read_csv(path).iloc[0].to_dict()
@@ -272,15 +276,15 @@ big_hub_df      = load_lr_big_hub()
 g1_grid         = load_g1_grid()
 g2_grid         = load_lr_grid("g2")
 g3_grid         = load_lr_grid("g3")
-cost_params     = load_cost_params()
 
 # LRP family helpers: any method whose key starts with "LRP" is an LRP variant.
-# lr_base is the filename prefix for its hubs/fleet files (e.g. "lr" or "lr_old").
+# lr_base is the filename prefix for its hubs/fleet/cost files (e.g. lr, lr_old, lr_L).
 is_lrp = bool(selected_method) and selected_method.startswith("LRP")
 lr_base = (
     RESULT_PATTERNS[selected_method][1].rsplit("_lockers", 1)[0]
     if is_lrp else "lr"
 )
+cost_params     = load_cost_params(lr_base)
 results_df      = (
     load_results(result_path(selected_method, selected_p))
     if selected_method and selected_p is not None else None
@@ -345,7 +349,8 @@ if is_lrp and cost_params is not None and selected_p is not None:
     opex_daily    = n_lockers * cp["F_LOCKER"]        + n_hubs * cp["F_HUB"]
     capex_daily   = n_lockers * cp["OPEN_LOCKER_DAY"] + n_hubs * cp["OPEN_HUB_DAY"]
     vehicle_daily = cp["A_VEHICLE"] * total_fleet
-    uncaptured_daily = cp["COST_UNCAPTURED"] * (total_demand - total_captured)
+    _L = cp.get("L", 1.0)   # weight on uncaptured demand (md "step 1")
+    uncaptured_daily = _L * cp["COST_UNCAPTURED"] * (total_demand - total_captured)
 
     # Daily objective from the runtime log (sum of all daily terms)
     _obj = None
@@ -380,10 +385,11 @@ if is_lrp and cost_params is not None and selected_p is not None:
             f"fixed: **{opex_daily + capex_daily:,.0f}**  ·  "
             f"fleet: **{vehicle_daily:,.0f}**  ·  "
             f"routing: **{max(routing_daily, 0):,.0f}**  ·  "
-            f"uncaptured penalty: **{uncaptured_daily:,.0f}**  =  "
+            f"uncaptured penalty (L={_L:g}): **{uncaptured_daily:,.0f}**  =  "
             f"**{daily_total:,.0f} BRL/day**  "
             f"(lockers {cp['F_LOCKER']:.0f}/day + {cp['OPEN_LOCKER']:,.0f} CapEx; "
-            f"hubs {cp['F_HUB']:.0f}/day + {cp['OPEN_HUB']:,.0f} CapEx)"
+            f"hubs {cp['F_HUB']:.0f}/day + {cp['OPEN_HUB']:,.0f} CapEx; "
+            f"L = weight on uncaptured demand)"
         )
 
 # ── Method info bar ───────────────────────────────────────────────────────────
@@ -406,10 +412,14 @@ if solve_times is not None and selected_method and selected_p is not None:
             _obj = _st_row["objective"].values[0]
             if pd.notna(_obj):
                 _info_parts.append(f"**Total daily cost:** {_obj:,.0f} BRL")
+        # Show the model's weight L on uncaptured demand
+        if is_lrp and cost_params is not None:
+            _Lval = cost_params.get("L", 1.0)
+            _info_parts.append(f"**L (uncaptured-demand weight):** {_Lval:g}")
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:
-    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"] if m != selected_method]
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)", "LRP-MNL (routing cost double-counts demand)"] if m != selected_method]
     _cur_set = set(open_locker_ids)
     _diff_flags = []
     for _om in _other_methods:
@@ -479,7 +489,7 @@ if solve_times is not None and not solve_times.empty:
     with tab_right:
         st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
-            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"]
+            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)", "LRP-MNL (routing cost double-counts demand)"]
             fig_trend = go.Figure()
             for meth in methods_order:
                 df_m = (
@@ -536,7 +546,7 @@ if solve_times is not None and not solve_times.empty:
     # ── Locker comparison across methods for selected P ───────────────────
     st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
     _locker_rows = []
-    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)"]:
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL (without cost on lost market share)", "LRP-MNL (with cost on lost market share)", "LRP-MNL (routing cost double-counts demand)"]:
         _lpath = lockers_path(_m, selected_p)
         if _lpath.exists():
             _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())

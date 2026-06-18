@@ -21,7 +21,7 @@ Mathematical formulation (06_Location_Routing.md)
         + Σ_j (o_j/T)·y_j  +  Σ_h (O_h/T)·v_h            [opening CapEx, amortised over T days]
         + Σ_j a_j·q_j
         + Σ_i Σ_j c_ij·u_ij·X_ij             [routing cost — BHH total tour, not ×ω_i]
-        + COST_UNCAPTURED · Σ_i ω_i·Z_i      [uncaptured demand]
+        + L · COST_UNCAPTURED · Σ_i ω_i·Z_i  [uncaptured demand, weighted by L]
 
   s.t.
   (CC)    Σ_k u_ik·X_ik + Z_i = 1            ∀ i
@@ -96,7 +96,7 @@ P_HUB      = int(os.environ.get("MNL_P_HUB", 3))  # small hubs to open
 # (old routing×ω behaviour) side by side with the corrected one.
 #   default run  → "without cost on lost market share"  (ROUTING_WEIGHT_BY_DEMAND=0)
 #   variant run  → MNL_ROUTING_BY_DEMAND=1 LR_OUT_PREFIX=lr_old \
-#                  LR_METHOD_LABEL="LRP-MNL (with cost on lost market share)"
+#                  LR_METHOD_LABEL="LRP-MNL (routing cost double-counts demand)"
 #   LR_OUT_PREFIX    : filename prefix for results/lockers/hubs/fleet (default "lr")
 #   LR_METHOD_LABEL  : label written to the runtime log
 OUT_PREFIX   = os.environ.get("LR_OUT_PREFIX",   "lr")
@@ -167,6 +167,14 @@ CAP_HUB_OVERRIDE = 3000.0  # coherent micro-hub throughput [parcels/day]; None =
 # Home delivery SP (Loggi/Flash): R$10–15/parcel → use R$20 to incentivize capture
 # up to breakeven distance of ~4.5 km.  Ask professor for authoritative C0 value.
 COST_UNCAPTURED = 20.0    # [BRL·√(parcel) "equivalent" per uncaptured parcel unit]
+
+# L: extra weight on the UNCAPTURED-demand term (md "step 1").
+# The uncaptured penalty becomes  L · COST_UNCAPTURED · Σ ω_i Z_i.
+# Raising L gives lost demand more importance → the P lockers spread to cover more
+# distinct demand instead of clustering.  L = 1 reproduces the previous behaviour.
+#   variant run → MNL_L=3 LR_OUT_PREFIX=lr_L \
+#                 LR_METHOD_LABEL="LRP-MNL (with cost on lost market share)"
+L = float(os.environ.get("MNL_L", 1.0))   # weight on uncaptured demand (≥ 1)
 
 # ---------------------------------------------------------------------------
 # Routing weighting — HYPOTHESIS / FIX (lockers clustering at the periphery)
@@ -371,6 +379,8 @@ print(f"  Costs — locker: {F_LOCKER:.0f} BRL/day OpEx + {OPEN_LOCKER:,.0f} BRL
       f"(→ {OPEN_LOCKER_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
 print(f"  Costs — hub   : {F_HUB:.0f} BRL/day OpEx + {OPEN_HUB:,.0f} BRL CapEx "
       f"(→ {OPEN_HUB_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
+print(f"  Uncaptured weight L = {L:g}  → effective penalty "
+      f"{L * COST_UNCAPTURED:g} BRL per uncaptured parcel")
 
 
 # ===========================================================================
@@ -486,7 +496,8 @@ model.setObjective(
     # the "Routing weighting" hypothesis block above.
     + gp.quicksum(c[i, j] * u[i, j] * X[i, j] * (w[i] if ROUTING_WEIGHT_BY_DEMAND else 1.0)
                   for i in I for j in close_J[i])
-    + gp.quicksum(COST_UNCAPTURED * w[i] * Z[i] for i in I),
+    # Uncaptured-demand penalty, weighted by L (md "step 1"): L·C0·Σ ω_i Z_i
+    + gp.quicksum(L * COST_UNCAPTURED * w[i] * Z[i] for i in I),
     GRB.MINIMIZE,
 )
 
@@ -748,10 +759,11 @@ pd.DataFrame([{
     "OPEN_LOCKER_DAY": OPEN_LOCKER_DAY,
     "OPEN_HUB_DAY":    OPEN_HUB_DAY,
     "COST_UNCAPTURED": COST_UNCAPTURED,
+    "L":               L,
     "COST_PER_KM":     COST_PER_KM,
     "Q_CAPACITY":      Q_CAPACITY,
     "CAP_HUB":         CAP_HUB,
-}]).to_csv(RESULTS_OUT / "lr_cost_params.csv", index=False)
+}]).to_csv(RESULTS_OUT / f"{OUT_PREFIX}_cost_params.csv", index=False)
 
 # Runtime log
 _log = RESULTS_UTIL / "solve_times_lr.csv"

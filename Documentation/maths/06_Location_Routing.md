@@ -200,6 +200,20 @@ city edge (observed: all lockers at the northern extremity, market share *droppi
 grew). **Fix:** weight the routing term by the captured share only,
 $\sum_{ij} c_{ij}\,x_{ij}$ (no extra $\omega_i$ — flag `ROUTING_WEIGHT_BY_DEMAND=False`).
 
+### Uncaptured-demand weight $L$ (step 1)
+
+Even with the routing fixed, the $P$ lockers stay a bit clustered. To push them to
+cover more distinct demand we add a weight $L$ on the uncaptured-demand term:
+
+$$
+\dots + L \cdot \text{COST\_UNCAPTURED} \cdot \sum_i \omega_i Z_i
+$$
+
+In code: `L` (env `MNL_L`, default `1`) multiplies the existing per-parcel penalty
+`COST_UNCAPTURED` (= 20). Raising $L$ makes lost demand more important, so the optimiser
+spreads the lockers to capture more zones instead of clustering. The dashboard exposes
+this as the variant **"with cost on lost market share"** ($L=3$) next to the $L=1$ one.
+
 ### Single external big hub
 
 Exactly **one** big hub, placed arbitrarily outside the demand bounding box (north,
@@ -209,15 +223,34 @@ Small-hub throughput `CAP_HUB` = 3 000 parcels/day (coherent micro-depot).
 
 ---
 
-## Issues
+## Results
 
 As we can see ![Map step1](../img/LR-step1.png)
-We have to add a cost of the market share we don't capture so it gives it more weight and less for the routing price so we couldn't see anymore clusters of lockers
+first of all we had an issue, we counted twice the routing cost, so basically the distance between lockers and hub is super small. After that fixed we had this : ![Map step2](../img/LR-s2-clustered.png)
+
+We can see that lockers cover more demande (around 17% of total demand) but we can see that they are still a bit clustered.
+
+
 
 ### Step 1
 
-add costs of lost market share
-no capacity for lockers
+### Brief
+- [x] add costs of lost market share
+- [x] no capacity for lockers
+
+
+We have to add a cost of lossing a market share so it gives it more weight and less for the routing price so we couldn't see anymore clusters of lockers
+
+
+$$
+\text{UL, }
+\qquad
+\text{min: }
+\sum_{j} f{_j} y_j + \sum_{j} a_j q_j + \sum_{i}\sum_{j} c_{ij}x_{ij}\omega_{ij}
++\sum_{i}\frac{\omega_i}{\sum_{j}u_{ij}y_{j}+1}.L
+$$
+
+given L is a weight to give more importance to the market share
 
 ### Step 2
 
