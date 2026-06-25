@@ -90,28 +90,33 @@ G2_FACTOR  = 3     # G1 cells per side for locker grid  → ~9 km² per cell
 G3_FACTOR  = 5     # G1 cells per side for small hub grid → ~25 km² per cell
 
 P          = int(os.environ.get("MNL_P",     7))   # lockers to open
-P_HUB      = int(os.environ.get("MNL_P_HUB", 3))  # small hubs to open
+# Small-hub budget: default = P ⇒ up to one hub per locker ⇒ the cap never binds,
+# so the SOLVER chooses how many hubs to open, driven purely by the hub cost.
+P_HUB      = int(os.environ.get("MNL_P_HUB", P))  # max small hubs (default: free)
 
-# Output naming — lets us save the "with cost on lost market share" variant
-# (old routing×ω behaviour) side by side with the corrected one.
-#   default run  → "without cost on lost market share"  (ROUTING_WEIGHT_BY_DEMAND=0)
-#   variant run  → MNL_ROUTING_BY_DEMAND=1 LR_OUT_PREFIX=lr_old \
-#                  LR_METHOD_LABEL="LRP-MNL (routing cost double-counts demand)"
-#   LR_OUT_PREFIX    : filename prefix for results/lockers/hubs/fleet (default "lr")
+# Output naming.  The default run is the final two-echelon model; the dashboard
+# also keeps two earlier variants as a trace, regenerated with:
+#   step 1 (bug)  → MNL_ROUTING_BY_DEMAND=1 LR_OUT_PREFIX=lr_old \
+#                   LR_METHOD_LABEL="LRP-MNL — 1. routing double-count (clusters)"
+#   step 2 (7 hubs) → MNL_COST_PER_KM_HUB=1e9 LR_OUT_PREFIX=lr_bal \
+#                   LR_METHOD_LABEL="LRP-MNL — 2. coherent costs (7 hubs)"
+#   LR_OUT_PREFIX    : filename prefix for results/lockers/hubs/fleet
 #   LR_METHOD_LABEL  : label written to the runtime log
-OUT_PREFIX   = os.environ.get("LR_OUT_PREFIX",   "lr")
+OUT_PREFIX   = os.environ.get("LR_OUT_PREFIX",   "lr_2ech")
 METHOD_LABEL = os.environ.get(
-    "LR_METHOD_LABEL", "LRP-MNL (without cost on lost market share)"
+    "LR_METHOD_LABEL", "LRP-MNL — 3. two-echelon hubs (final)"
 )
 
 # MNL utility parameters
-ALPHA      = 2.0    # Huff distance-decay exponent
-# A_HUFF calibration (São Paulo parcel lockers, 2024):
-#   u_ij = A_HUFF / d_ij²   (U0_FORM=1 fixed by CC substitution)
-#   At d km, locker MNL share = (A_HUFF/d²) / (A_HUFF/d² + 1)
-#   A_HUFF=5 → 83% at 1 km, 56% at 1.5 km, 20% at 3 km, 5% at 10 km
-#   Aggregate share with P=7 over ~2100 km² ≈ 5–8% (realistic for nascent service)
-A_HUFF     = 5.0
+ALPHA      = float(os.environ.get("MNL_ALPHA", 2.0))   # Huff distance-decay exponent
+# A_HUFF calibration (São Paulo parcel lockers).  U0_FORM=1 fixed by CC.
+#   u_ij = A_HUFF / d_ij^ALPHA ;  locker MNL share = u/(u+1).
+#   Bigger A_HUFF ⇒ wider capture radius (more share at distance).
+#   A_HUFF=5  → 83% @1km, 56% @2km, 36% @3km, 17% @5km  (narrow — old)
+#   A_HUFF=12 → 92% @1km, 75% @2km, 57% @3km, 32% @5km  (mid — between MILP & old LRP)
+# The Exact-MILP model uses a much smaller outside option, so it captures ~71% of
+# *every* zone (radius "too wide"); A_HUFF here sets a coherent middle ground.
+A_HUFF     = float(os.environ.get("MNL_A_HUFF", 12.0))
 U0_FORM    = 1.0    # outside-option utility — must stay 1.0 for CC formulation validity
 
 # Distance cutoff: only model X_ij for zone-locker pairs within this range.
@@ -133,11 +138,17 @@ MIN_DIST_KM = 0.15  # clamp to avoid u_ij → ∞ when zone centroid ≈ G2 cent
 #   With A_j=8.2, η=5: d* ≈ 20/(0.7·6.4) ≈ 4.5 km
 #   → model captures demand from zones within ~4.5 km; ignores zones farther away.
 # ---------------------------------------------------------------------------
-COST_PER_KM     = 0.70    # ρ: motorcycle operating cost [BRL/km] (fuel + wear)
+COST_PER_KM     = float(os.environ.get("MNL_COST_PER_KM", 0.30))  # ρ [BRL/km]; set 0 → no routing cost
+# Second-echelon transport: daily van/bike tour cost from a small hub to each
+# locker it supplies, ≈ ρ2 · distance(hub, locker).  This makes "open another hub"
+# vs "deliver farther from an existing hub" an endogenous trade-off, so one hub
+# can cover several lockers.  MAX_DIST_HUB_KM caps how far a hub may supply a locker.
+COST_PER_KM_HUB = float(os.environ.get("MNL_COST_PER_KM_HUB", 100.0))  # ρ2 [BRL/km/day] (≈100 → 2 hubs)
+MAX_DIST_HUB_KM = float(os.environ.get("MNL_MAX_DIST_HUB_KM", 30.0))   # hub→locker reach [km]
 F_LOCKER        = 150.0   # locker daily rental + electricity + maintenance [BRL/day]
 # A small hub is a staffed micro-depot (≈300 m² rent + 2 handlers + handling
 # equipment), MUCH more expensive to open than an automated parcel locker.
-F_HUB           = 2000.0  # small hub daily cost [BRL/day]  (≈13× a locker)
+F_HUB           = float(os.environ.get("MNL_F_HUB", 2000.0))  # small hub daily cost [BRL/day]
 A_VEHICLE       = 200.0   # motorcycle courier: salary + fuel (fixed part) [BRL/day]
 
 # ---------------------------------------------------------------------------
@@ -150,7 +161,7 @@ A_VEHICLE       = 200.0   # motorcycle courier: salary + fuel (fixed part) [BRL/
 # Shorten AMORT_DAYS to make opening cost weigh more per day.
 # ---------------------------------------------------------------------------
 OPEN_LOCKER     = 20000.0   # one-time locker unit purchase + install [BRL]
-OPEN_HUB        = 150000.0  # one-time small-hub fit-out (racking, IT, signage) [BRL]
+OPEN_HUB        = float(os.environ.get("MNL_OPEN_HUB", 150000.0))  # one-time small-hub fit-out [BRL]
 AMORT_DAYS      = 730.0     # amortisation horizon [days] (≈2 operational years)
 OPEN_LOCKER_DAY = OPEN_LOCKER / AMORT_DAYS   # daily-equivalent CapEx, locker
 OPEN_HUB_DAY    = OPEN_HUB    / AMORT_DAYS   # daily-equivalent CapEx, small hub
@@ -195,9 +206,9 @@ L = float(os.environ.get("MNL_L", 1.0))   # weight on uncaptured demand (≥ 1)
 ROUTING_WEIGHT_BY_DEMAND = os.environ.get("MNL_ROUTING_BY_DEMAND", "0") == "1"
 
 # Solver
-MIP_GAP           = 0.05
-TIME_LIMIT        = 7200
-NO_PROGRESS_LIMIT = 3600
+MIP_GAP           = float(os.environ.get("MNL_MIP_GAP",     0.05))
+TIME_LIMIT        = int(os.environ.get("MNL_TIME_LIMIT",    7200))
+NO_PROGRESS_LIMIT = int(os.environ.get("MNL_NO_PROGRESS",   3600))
 
 
 # ===========================================================================
@@ -329,15 +340,35 @@ g2_lat_arr  = np.array([g2_meta.loc[j, "centroid_lat"] for j in J])
 g2_lon_arr  = np.array([g2_meta.loc[j, "centroid_lon"] for j in J])
 g2_area_arr = np.array([g2_meta.loc[j, "area_km2"]     for j in J])
 
-# G3 children map: h → list of G2 locker ids
+# G3 children map: h → list of G2 locker ids (kept for warm start / reference)
 g3_children = {h: [] for h in H}
 for j in J:
     g3_children[g2_to_g3[j]].append(j)
+
+# ── Flexible hub→locker candidate pairs (2nd echelon) ───────────────────────
+# A locker may be supplied by any open hub within MAX_DIST_HUB_KM (its own G3
+# parent is always allowed).  hub_dist[(h, j)] = van-tour distance [km].
+g3_lat = {h: float(g3_meta.loc[h, "centroid_lat"]) for h in H}
+g3_lon = {h: float(g3_meta.loc[h, "centroid_lon"]) for h in H}
+g2_lat = dict(zip(J, g2_lat_arr))
+g2_lon = dict(zip(J, g2_lon_arr))
+
+hub_dist  = {}                 # (h, j) → km
+cand_hubs = {j: [] for j in J}  # j → list of candidate hubs
+for j in J:
+    for h in H:
+        dkm = math.hypot((g3_lat[h] - g2_lat[j]) * LAT_KM,
+                         (g3_lon[h] - g2_lon[j]) * lon_km)
+        if dkm <= MAX_DIST_HUB_KM or h == g2_to_g3[j]:
+            hub_dist[h, j] = dkm
+            cand_hubs[j].append(h)
 
 print(f"  G2 locker candidates : {len(J)} cells  "
       f"(~{g2_area_arr.mean():.1f} km² per cell, factor={G2_FACTOR}×{G2_FACTOR})")
 print(f"  G3 hub   candidates  : {len(H)} cells  "
       f"(~{g3_df['area_km2'].mean():.1f} km² per cell, factor={G3_FACTOR}×{G3_FACTOR})")
+print(f"  Hub→locker pairs (≤{MAX_DIST_HUB_KM:g} km) : {len(hub_dist)}  "
+      f"(ρ2={COST_PER_KM_HUB:g} BRL/km/day)")
 
 
 # ===========================================================================
@@ -478,6 +509,10 @@ X = model.addVars(
     lb=0.0, name="X"
 )
 
+# a[h,j] ∈ [0,1] : share of locker j supplied by hub h (continuous → no extra
+# binaries; transport minimisation drives it to the nearest open hub).
+a = model.addVars(list(hub_dist.keys()), lb=0.0, ub=1.0, name="a")
+
 for i in I:
     Z[i].LB = Z_under[i]
     Z[i].UB = 1.0   # see Z_bar comment above
@@ -496,6 +531,8 @@ model.setObjective(
     # the "Routing weighting" hypothesis block above.
     + gp.quicksum(c[i, j] * u[i, j] * X[i, j] * (w[i] if ROUTING_WEIGHT_BY_DEMAND else 1.0)
                   for i in I for j in close_J[i])
+    # 2nd-echelon hub→locker tour cost: ρ2 · distance · a[h,j]
+    + gp.quicksum(COST_PER_KM_HUB * hub_dist[h, j] * a[h, j] for (h, j) in hub_dist)
     # Uncaptured-demand penalty, weighted by L (md "step 1"): L·C0·Σ ω_i Z_i
     + gp.quicksum(L * COST_UNCAPTURED * w[i] * Z[i] for i in I),
     GRB.MINIMIZE,
@@ -535,22 +572,19 @@ for j in J:
 for j in J:
     model.addConstr(q[j] <= M_big * y[j], name=f"LNK_{j}")
 
-# ── (HPAR) Locker needs open parent hub ──────────────────────────────────────
+# ── (ASSIGN) Flexible 2nd echelon: each open locker → exactly one open hub ─────
+# Replaces the old fixed parent nesting (HPAR).  A locker may attach to any open
+# hub within MAX_DIST_HUB_KM; the van-tour cost ρ2·dist is paid in the objective,
+# so one hub can cover several lockers.
 for j in J:
-    model.addConstr(y[j] <= v[g2_to_g3[j]], name=f"HPAR_{j}")
+    model.addConstr(
+        gp.quicksum(a[h, j] for h in cand_hubs[j]) == y[j], name=f"ASSIGN_{j}"
+    )
+    for h in cand_hubs[j]:
+        model.addConstr(a[h, j] <= v[h], name=f"ALINK_{h}_{j}")
 
-# ── (HCAP) Small hub capacity ─────────────────────────────────────────────────
-for h in H:
-    children = g3_children[h]
-    if children:
-        model.addConstr(
-            gp.quicksum(
-                w[i] * u[i, j] * X[i, j]
-                for j in children
-                for i in I if j in close_J[i]
-            ) <= CAP_HUB * v[h],
-            name=f"HCAP_{h}",
-        )
+# (HCAP small-hub flow capacity dropped: with flexible assignment it would be
+#  bilinear a·X.  Total throughput is still bounded by the big hub, BCAP below.)
 
 # ── (BCAP) Big hub total capacity ─────────────────────────────────────────────
 # Total captured = Σ_i ω_i · (1 - Z_i) ≤ CAP_BIG_HUB
@@ -585,25 +619,61 @@ for i in I:
 greedy_lockers, _ = greedy_open(P, I, J, w, u_sparse, u0_g)
 print(f"  Greedy done in {time.time()-_t_ws:.1f}s → {greedy_lockers[:5]}…")
 
-# Restrict warm start to P_HUB hub parents so budget_hubs is satisfied.
-# Pick the P_HUB most-represented hubs among greedy lockers, then collect
-# P lockers from those hubs (greedy order first, then any other J in those hubs).
-hub_counts = Counter(g2_to_g3[j] for j in greedy_lockers if j in g2_to_g3)
-chosen_hubs = {h for h, _ in hub_counts.most_common(P_HUB)}
+# Warm start = the P greedy lockers, supplied by a hub set chosen by a greedy
+# facility-location heuristic.  Gurobi does NOT change the hub count of the warm
+# start within the time limit (it neither closes nor opens hubs), so the warm
+# start must already use the ~right number of hubs for the current ρ2.
+warm_lockers = greedy_lockers[:P]
 
-# Lockers in chosen hubs, greedy order first, then fill from remaining J
-warm_lockers = [j for j in greedy_lockers if g2_to_g3.get(j) in chosen_hubs]
-if len(warm_lockers) < P:
-    extras = [j for j in J if g2_to_g3.get(j) in chosen_hubs and j not in warm_lockers]
-    warm_lockers.extend(extras[:P - len(warm_lockers)])
-warm_lockers = warm_lockers[:P]
+cand_set = sorted({h for j in warm_lockers for h in cand_hubs[j]})
 
-print(f"  Warm-start hubs  : {chosen_hubs}")
+def _assign_cost(open_set):
+    """Each warm locker → nearest open hub; return (assignment, transport cost)."""
+    assign, tr = {}, 0.0
+    for j in warm_lockers:
+        h = min((h for h in open_set if h in cand_hubs[j]),
+                key=lambda h: hub_dist[h, j])
+        assign[j] = h
+        tr += hub_dist[h, j]
+    return assign, COST_PER_KM_HUB * tr
+
+# Base: minimal set cover so every warm locker is reachable
+hub_to_warm = {}
+for j in warm_lockers:
+    for h in cand_hubs[j]:
+        hub_to_warm.setdefault(h, set()).add(j)
+uncovered, chosen_hubs = set(warm_lockers), set()
+while uncovered:
+    best_h = max(hub_to_warm, key=lambda h: len(hub_to_warm[h] & uncovered))
+    chosen_hubs.add(best_h)
+    uncovered -= hub_to_warm[best_h]
+
+# Greedily OPEN hubs while it lowers (hub cost + transport) — matches the ρ2 regime
+_HUB_DAY = F_HUB + OPEN_HUB_DAY
+_cur = len(chosen_hubs) * _HUB_DAY + _assign_cost(chosen_hubs)[1]
+while True:
+    best_h, best_cost = None, _cur
+    for h in cand_set:
+        if h in chosen_hubs:
+            continue
+        c2 = (len(chosen_hubs) + 1) * _HUB_DAY + _assign_cost(chosen_hubs | {h})[1]
+        if c2 < best_cost - 1e-6:
+            best_cost, best_h = c2, h
+    if best_h is None:
+        break
+    chosen_hubs.add(best_h)
+    _cur = best_cost
+
+warm_assign, _ = _assign_cost(chosen_hubs)
+
+print(f"  Warm-start hubs  ({len(chosen_hubs)}): {chosen_hubs}")
 print(f"  Warm-start lockers: {warm_lockers}")
 for j in J:
     y[j].Start = 1.0 if j in warm_lockers else 0.0
 for h in H:
     v[h].Start = 1.0 if h in chosen_hubs else 0.0
+for (h, j) in hub_dist:
+    a[h, j].Start = 1.0 if (j in warm_assign and warm_assign[j] == h) else 0.0
 
 
 # ===========================================================================
@@ -654,6 +724,18 @@ open_lockers = [j for j in J if y[j].X > 0.5]
 open_hubs    = [h for h in H if v[h].X > 0.5]
 fleet        = {j: int(round(q[j].X)) for j in open_lockers}
 mip_gap      = model.MIPGap
+
+# Resolve the flexible hub→locker assignment: each open locker → its dominant hub.
+assigned_hub = {}
+for j in open_lockers:
+    best_h, best_share = g2_to_g3.get(j), -1.0
+    for h in cand_hubs[j]:
+        sh = a[h, j].X
+        if sh > best_share:
+            best_share, best_h = sh, h
+    assigned_hub[j] = best_h
+# Total 2nd-echelon distance (van tours) of the chosen solution
+hub_tour_km = sum(hub_dist[assigned_hub[j], j] for j in open_lockers)
 obj_val      = model.ObjVal
 
 # Cost breakdown of the chosen solution
@@ -668,6 +750,8 @@ print(f"Objective   : {obj_val:,.2f}")
 print(f"Solve time  : {_t_elapsed:.0f}s")
 print(f"Open lockers ({len(open_lockers)}) : {open_lockers}")
 print(f"Open hubs   ({len(open_hubs)}) : {open_hubs}")
+print(f"Hub→locker  : {len(open_lockers)} lockers from {len(open_hubs)} hubs  "
+      f"(total van-tour {hub_tour_km:.1f} km, cost {COST_PER_KM_HUB*hub_tour_km:,.0f} BRL/day)")
 print(f"Fleet       : {fleet}")
 print(f"Opening CapEx (one-time) : {capex_total:,.0f} BRL "
       f"({len(open_lockers)}×{OPEN_LOCKER:,.0f} + {len(open_hubs)}×{OPEN_HUB:,.0f})")
@@ -712,7 +796,8 @@ locker_coords = pd.DataFrame([
         "centroid_lat":  g2_meta.loc[j, "centroid_lat"],
         "centroid_lon":  g2_meta.loc[j, "centroid_lon"],
         "area_km2":      g2_meta.loc[j, "area_km2"],
-        "parent_hub":    g2_to_g3.get(j),
+        "parent_hub":    assigned_hub.get(j),                 # flexible assignment
+        "hub_dist_km":   round(hub_dist[assigned_hub[j], j], 3),
     }
     for j in open_lockers
 ])
@@ -725,7 +810,7 @@ hub_coords = pd.DataFrame([
         "centroid_lat":  g3_meta.loc[h, "centroid_lat"],
         "centroid_lon":  g3_meta.loc[h, "centroid_lon"],
         "area_km2":      g3_meta.loc[h, "area_km2"],
-        "n_lockers":     sum(1 for j in open_lockers if g2_to_g3.get(j) == h),
+        "n_lockers":     sum(1 for j in open_lockers if assigned_hub.get(j) == h),
     }
     for h in open_hubs
 ])
@@ -761,6 +846,7 @@ pd.DataFrame([{
     "COST_UNCAPTURED": COST_UNCAPTURED,
     "L":               L,
     "COST_PER_KM":     COST_PER_KM,
+    "COST_PER_KM_HUB": COST_PER_KM_HUB,
     "Q_CAPACITY":      Q_CAPACITY,
     "CAP_HUB":         CAP_HUB,
 }]).to_csv(RESULTS_OUT / f"{OUT_PREFIX}_cost_params.csv", index=False)
@@ -771,6 +857,7 @@ _new = pd.DataFrame([{
     "method":           METHOD_LABEL,
     "P":                P,
     "P_hub":            P_HUB,
+    "L":                L,
     "solve_time_s":     round(_t_elapsed, 2),
     "objective":        round(obj_val, 2),
     "market_share_pct": round(total_captured / total_demand * 100, 3),
@@ -779,7 +866,10 @@ _new = pd.DataFrame([{
 }])
 if _log.exists():
     _ex = pd.read_csv(_log)
-    _ex = _ex[~((_ex["method"] == METHOD_LABEL) & (_ex["P"] == P))]
+    if "L" not in _ex.columns:
+        _ex["L"] = 1.0   # rows logged before L existed used L = 1
+    # Replace the row for this exact (method, P, L) combination
+    _ex = _ex[~((_ex["method"] == METHOD_LABEL) & (_ex["P"] == P) & (_ex["L"] == L))]
     _new = pd.concat([_ex, _new], ignore_index=True)
 _new.to_csv(_log, index=False)
 

@@ -279,4 +279,123 @@ $$
 
 clients complain when congestion is btw 70% to 80%
 
+---
+
+## Approach & issues encountered (chronological)
+
+The calibration was iterative; each step fixed a problem revealed by the previous map.
+All variants are kept in the Streamlit dashboard as a trace.
+
+1. **Routing cost double-counted by demand** → lockers clustered at the city edge
+   (top-right), capturing almost nothing (market share ~1–4 %, and it even *dropped*
+   as P grew). The BHH cost $c_{ij}=\rho\,l_{ij}\sqrt{A_j\eta_i}$ is already a total
+   tour cost ($\sqrt{A_j\eta_i}\approx\sqrt{n_i}$); the objective multiplied it again
+   by $\omega_i$, so serving a dense zone scaled as $\omega_i^{1.5}$ vs a capture
+   reward only $\propto\omega_i$. **Fix:** weight routing by the captured share only
+   (`ROUTING_WEIGHT_BY_DEMAND=False`). Market share became monotone in P (P=3 → 11 %,
+   P=7 → 19 %). *(variant: "routing cost double-counts demand")*
+
+2. **Opening cost added.** Each site now carries a one-time CapEx (locker 20 000 BRL,
+   hub 150 000 BRL) on top of the daily OpEx, amortised over `AMORT_DAYS` = 730 days.
+
+3. **Weight $L$ on uncaptured demand** (term $L\cdot C_0\cdot\sum_i\omega_i Z_i$) to push
+   capture and break the remaining clustering. **Issue:** $L$ *saturates* — L = 2, 5, 10
+   give the **identical** solution (22.7 %). Beyond L≈2 it is P (and the hubs) that bind,
+   not the weight.
+
+4. **Hub count freed** (`P_HUB = P`, cost-driven instead of a hard cap). **Issue:** the
+   solver then opens **one hub per locker** (7 hubs), because spreading lockers captures
+   more than a hub costs ⇒ the hub cost is currently **too low** to act as a real lever.
+
+5. **Convergence to the "no routing" target verified.** With free hubs and L≥2 the full
+   model gives *exactly* the same lockers/hubs as solving with `COST_PER_KM=0`
+   (capture-maximisation). Routing had become non-binding. *(variant: "no routing — target")*
+
+6. **Capture-radius mismatch (MILP vs LRP).** The Exact-MILP model captures ~71 % of
+   *every* zone (overall 79 %, very wide radius) because its outside option is tiny; the
+   LRP with $U_0=1$ (fixed by Charnes-Cooper) has a narrow radius (~22 %). **Fix:** raise
+   the locker attractiveness `A_HUFF` 5 → 12 for a coherent middle, and re-introduce a
+   **secondary, coherent routing cost** `COST_PER_KM` 0.70 → 0.30.
+   *(variant: "balanced — coherent costs")*
+
+### Current balanced result (P=7, A_HUFF=12, COST_PER_KM=0.30, L=1, free hubs)
+
+Market share **36.5 %** (between MILP 79 % and the narrow LRP 22 %). Daily cost breakdown:
+
+| Term | BRL/day | Share |
+|---|---|---|
+| Uncaptured-demand penalty | 135 200 | 80 % |
+| Hubs (7) | 15 438 | 9 % |
+| Fleet (51 vehicles) | 10 200 | 6 % |
+| Routing | 6 682 | 4 % |
+| Lockers (7) | 1 242 | 1 % |
+
+Routing is now a **secondary term (4 %)**, on par with the fleet cost — coherent, since
+last-mile delivery (fleet + routing ≈ 17 k) naturally exceeds the locker rental (1.2 k).
+
+7. **Why so many hubs, and the real fix — a flexible 2nd echelon.** Raising the hub
+   cost alone did *not* reduce the 7 hubs (even at 2 822 BRL/day/hub) and made the MILP
+   intractable. The reason: the original model had **no hub→locker transport cost** and a
+   **fixed** geographic nesting (each locker tied to the hub of its own G3 cell), so an
+   extra hub was "free coverage". **Fix:** make the hub→locker link a *decision* —
+   continuous assignment $a_{hj}\in[0,1]$ (any open hub may supply any locker within
+   `MAX_DIST_HUB_KM`), with a tour cost $\rho_2\cdot\text{dist}(h,j)\cdot a_{hj}$ in the
+   objective. The solver now trades **"open a hub" (≈2 205/day)** against **"deliver a
+   locker from an existing hub" ($\rho_2\cdot$dist/day)**, so one hub can cover several
+   lockers. *(variant: "2-echelon hub routing")*
+   - **Solver note:** Gurobi keeps the **hub count of the warm start** within the time
+     limit (it neither closes nor opens hubs from it). So the warm start must already use
+     the right count: a **greedy facility-location warm start** opens a hub while it lowers
+     (hub cost + transport), i.e. it adapts to $\rho_2$. With it, $\rho_2=40$ → **1 hub**,
+     **$\rho_2=100$ → 2 hubs** (g6_8 serves 5 lockers, g2_8 serves 2; van tours 5–21 km,
+     79 km/day, 7 859 BRL/day). $\rho_2$ is the compromise knob: low → few hubs / long
+     tours, high → more hubs / short tours.
+
+### Current balanced result (P=7, A_HUFF=12, COST_PER_KM=0.30, L=1, free hubs)
+
+Market share **36.5 %** (between MILP 79 % and the narrow LRP 22 %). Daily cost breakdown:
+
+| Term | BRL/day | Share |
+|---|---|---|
+| Uncaptured-demand penalty | 135 200 | 80 % |
+| Hubs (7) | 15 438 | 9 % |
+| Fleet (51 vehicles) | 10 200 | 6 % |
+| Routing | 6 682 | 4 % |
+| Lockers (7) | 1 242 | 1 % |
+
+Routing is now a **secondary term (4 %)**, on par with the fleet cost — coherent, since
+last-mile delivery (fleet + routing ≈ 17 k) naturally exceeds the locker rental (1.2 k).
+The 2-echelon variant replaces the 7 hubs with **2** (default $\rho_2=100$, tunable).
+
+### Final model (default configuration)
+
+| Layer | Decision | Cost in objective |
+|---|---|---|
+| Big hub (1, external) | fixed | — (flux ≥ demand, non-binding) |
+| Small hubs | open `v_h` (cost-driven count) | `F_HUB` + amortised `OPEN_HUB` per open hub |
+| Hub → locker | flexible assignment `a_{hj}` | $\rho_2\cdot$dist tour cost (`COST_PER_KM_HUB`=100) |
+| Lockers | open `y_j` (exactly P) | `F_LOCKER` + amortised `OPEN_LOCKER` |
+| Locker → zones | MNL capture `x_{ij}` | BHH `COST_PER_KM`=0.30 + `L`·`COST_UNCAPTURED` penalty |
+
+Defaults: `A_HUFF`=12 (coherent capture radius), `COST_PER_KM`=0.30, `L`=1,
+`COST_PER_KM_HUB`=100, `MAX_DIST_HUB_KM`=30. Result at P=7: **2 hubs, 7 lockers,
+36.5 % market share**.
+
+### Dashboard variants kept (the story)
+
+1. **routing double-count (clusters)** — the initial bug, lockers at the edge (3.9 %).
+2. **coherent costs (7 hubs)** — radius + costs fixed (36.5 %) but one hub per locker.
+3. **two-echelon hubs (final)** — flexible hub↔locker routing → 2 hubs, real tours.
+
+(Intermediate experiments — L-weight sweep, no-routing target, single-echelon L=1 — were
+removed from the dashboard; their CSVs stay on disk as a trace.)
+
+### Open issues / next steps
+
+- **$\rho_2$ tuning** chooses the hub count: 40 → 1 hub, **100 → 2 hubs** (default), higher
+  → 3+. Pick per the realistic operating target.
+- **MIP gap** stays high (~18 %, no-progress stop); the flexible assignment enlarges the
+  LP — the warm start gives a good incumbent, but proving optimality needs more time or a
+  tighter formulation. Hub *placement* could still improve within the gap.
+
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
