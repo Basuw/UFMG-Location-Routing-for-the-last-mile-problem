@@ -21,7 +21,7 @@ Mathematical formulation (06_Location_Routing.md)
         + Σ_j (o_j/T)·y_j  +  Σ_h (O_h/T)·v_h            [opening CapEx, amortised over T days]
         + Σ_j a_j·q_j
         + Σ_i Σ_j c_ij·u_ij·X_ij             [routing cost — BHH total tour, not ×ω_i]
-        + L · COST_UNCAPTURED · Σ_i ω_i·Z_i  [uncaptured demand, weighted by L]
+        + L · Σ_i ω_i·Z_i                    [uncaptured demand; L = BRL per lost parcel]
 
   s.t.
   (CC)    Σ_k u_ik·X_ik + Z_i = 1            ∀ i
@@ -133,8 +133,8 @@ MIN_DIST_KM = 0.15  # clamp to avoid u_ij → ∞ when zone centroid ≈ G2 cent
 # artefact. All costs below are in BRL/day so their *relative* scale is correct.
 # Exact unit reconciliation requires the professor's full BHH formula.
 #
-# Breakeven capture distance (ρ·c_ij = COST_UNCAPTURED):
-#   d* = COST_UNCAPTURED / (ρ · √(A_j·η_i))
+# Breakeven capture distance (ρ·c_ij = L):
+#   d* = L / (ρ · √(A_j·η_i))
 #   With A_j=8.2, η=5: d* ≈ 20/(0.7·6.4) ≈ 4.5 km
 #   → model captures demand from zones within ~4.5 km; ignores zones farther away.
 # ---------------------------------------------------------------------------
@@ -174,18 +174,13 @@ BIG_HUB_FLUX_FACTOR = 1.5
 # capacity at 9000 < total demand → HCAP is a *real* constraint that also nudges
 # lockers to spread across hubs instead of cramming a single dense block.
 CAP_HUB_OVERRIDE = 3000.0  # coherent micro-hub throughput [parcels/day]; None = total_demand
-# COST_UNCAPTURED: opportunity cost of one parcel delivered by competitor instead of locker.
-# Home delivery SP (Loggi/Flash): R$10–15/parcel → use R$20 to incentivize capture
-# up to breakeven distance of ~4.5 km.  Ask professor for authoritative C0 value.
-COST_UNCAPTURED = 20.0    # [BRL·√(parcel) "equivalent" per uncaptured parcel unit]
-
-# L: extra weight on the UNCAPTURED-demand term (md "step 1").
-# The uncaptured penalty becomes  L · COST_UNCAPTURED · Σ ω_i Z_i.
-# Raising L gives lost demand more importance → the P lockers spread to cover more
-# distinct demand instead of clustering.  L = 1 reproduces the previous behaviour.
-#   variant run → MNL_L=3 LR_OUT_PREFIX=lr_L \
-#                 LR_METHOD_LABEL="LRP-MNL (with cost on lost market share)"
-L = float(os.environ.get("MNL_L", 1.0))   # weight on uncaptured demand (≥ 1)
+# L: cost of one UNCAPTURED parcel (opportunity cost: a parcel delivered by a
+# competitor / home delivery instead of a locker).  The objective term is
+# L · Σ_i ω_i Z_i, which both prices the lost demand (in BRL) and gives the model
+# the incentive to capture market share.  São Paulo home delivery ≈ R$10–15/parcel
+# → use R$20.  (This single parameter merges the old COST_UNCAPTURED × L pair,
+# which were redundant multipliers of the same term.)
+L = float(os.environ.get("MNL_L", 20.0))   # cost per uncaptured parcel [BRL/parcel]
 
 # ---------------------------------------------------------------------------
 # Routing weighting — HYPOTHESIS / FIX (lockers clustering at the periphery)
@@ -194,7 +189,7 @@ L = float(os.environ.get("MNL_L", 1.0))   # weight on uncaptured demand (≥ 1)
 # zone, because √(A_j·η_i) ≈ √(number of parcels in the cell).  Multiplying it a
 # second time by ω_i in the objective double-counts demand: the routing penalty
 # to fully serve a zone then scales as ω_i^1.5 while the capture reward
-# (COST_UNCAPTURED·ω_i) is only linear in ω_i.  Dense central zones therefore look
+# (L·ω_i) is only linear in ω_i.  Dense central zones therefore look
 # "too expensive to serve", so the optimiser parks the P lockers in low-density
 # cells at the city edge (observed: all lockers at the northern extremity, far
 # from the demand-weighted centroid) and market share even DROPS as P grows.
@@ -410,8 +405,7 @@ print(f"  Costs — locker: {F_LOCKER:.0f} BRL/day OpEx + {OPEN_LOCKER:,.0f} BRL
       f"(→ {OPEN_LOCKER_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
 print(f"  Costs — hub   : {F_HUB:.0f} BRL/day OpEx + {OPEN_HUB:,.0f} BRL CapEx "
       f"(→ {OPEN_HUB_DAY:.1f}/day over {AMORT_DAYS:.0f}d)")
-print(f"  Uncaptured weight L = {L:g}  → effective penalty "
-      f"{L * COST_UNCAPTURED:g} BRL per uncaptured parcel")
+print(f"  Uncaptured parcel cost L = {L:g} BRL/parcel")
 
 
 # ===========================================================================
@@ -533,8 +527,8 @@ model.setObjective(
                   for i in I for j in close_J[i])
     # 2nd-echelon hub→locker tour cost: ρ2 · distance · a[h,j]
     + gp.quicksum(COST_PER_KM_HUB * hub_dist[h, j] * a[h, j] for (h, j) in hub_dist)
-    # Uncaptured-demand penalty, weighted by L (md "step 1"): L·C0·Σ ω_i Z_i
-    + gp.quicksum(L * COST_UNCAPTURED * w[i] * Z[i] for i in I),
+    # Uncaptured-demand cost (md "step 1"): L · Σ ω_i Z_i  (L = BRL per lost parcel)
+    + gp.quicksum(L * w[i] * Z[i] for i in I),
     GRB.MINIMIZE,
 )
 
@@ -644,7 +638,12 @@ for j in warm_lockers:
         hub_to_warm.setdefault(h, set()).add(j)
 uncovered, chosen_hubs = set(warm_lockers), set()
 while uncovered:
-    best_h = max(hub_to_warm, key=lambda h: len(hub_to_warm[h] & uncovered))
+    # most coverage, ties broken by the nearest hub (smallest total distance)
+    best_h = max(
+        hub_to_warm,
+        key=lambda h: (len(hub_to_warm[h] & uncovered),
+                       -sum(hub_dist[h, j] for j in hub_to_warm[h] & uncovered)),
+    )
     chosen_hubs.add(best_h)
     uncovered -= hub_to_warm[best_h]
 
@@ -843,7 +842,6 @@ pd.DataFrame([{
     "AMORT_DAYS":      AMORT_DAYS,
     "OPEN_LOCKER_DAY": OPEN_LOCKER_DAY,
     "OPEN_HUB_DAY":    OPEN_HUB_DAY,
-    "COST_UNCAPTURED": COST_UNCAPTURED,
     "L":               L,
     "COST_PER_KM":     COST_PER_KM,
     "COST_PER_KM_HUB": COST_PER_KM_HUB,

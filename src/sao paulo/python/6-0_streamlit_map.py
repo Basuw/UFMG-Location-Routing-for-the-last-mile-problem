@@ -351,8 +351,10 @@ if is_lrp and cost_params is not None and selected_p is not None:
     opex_daily    = n_lockers * cp["F_LOCKER"]        + n_hubs * cp["F_HUB"]
     capex_daily   = n_lockers * cp["OPEN_LOCKER_DAY"] + n_hubs * cp["OPEN_HUB_DAY"]
     vehicle_daily = cp["A_VEHICLE"] * total_fleet
-    _L = cp.get("L", 1.0)   # weight on uncaptured demand (md "step 1")
-    uncaptured_daily = _L * cp["COST_UNCAPTURED"] * (total_demand - total_captured)
+    # L = cost per uncaptured parcel [BRL/parcel].  (Old CSVs stored it as a separate
+    # L weight × COST_UNCAPTURED; multiply both for backward compatibility.)
+    _L = cp.get("L", 20.0) * cp.get("COST_UNCAPTURED", 1.0)
+    uncaptured_daily = _L * (total_demand - total_captured)
 
     # 2nd-echelon hub→locker transport (only the 2-echelon variant stores hub_dist_km)
     hub_transport_daily = 0.0
@@ -398,11 +400,11 @@ if is_lrp and cost_params is not None and selected_p is not None:
             f"fleet: **{vehicle_daily:,.0f}**  ·  "
             f"routing: **{max(routing_daily, 0):,.0f}**  ·  "
             + (f"hub→locker tours: **{hub_transport_daily:,.0f}**  ·  " if hub_transport_daily > 0 else "")
-            + f"uncaptured penalty (L={_L:g}): **{uncaptured_daily:,.0f}**  =  "
+            + f"uncaptured (L={_L:g} BRL/parcel): **{uncaptured_daily:,.0f}**  =  "
             f"**{daily_total:,.0f} BRL/day**  "
             f"(lockers {cp['F_LOCKER']:.0f}/day + {cp['OPEN_LOCKER']:,.0f} CapEx; "
             f"hubs {cp['F_HUB']:.0f}/day + {cp['OPEN_HUB']:,.0f} CapEx; "
-            f"L = weight on uncaptured demand)"
+            f"L = cost of one uncaptured parcel)"
         )
 
 # ── Method info bar ───────────────────────────────────────────────────────────

@@ -163,65 +163,6 @@ $$
   - truck goes from hubs to small hubs 
   - then bicycle, cars, ... goes from small hubs to deliver to lockers
 
----
-
-## Implementation decisions (6-4_location_routing.py)
-
-### Cost structure — daily OpEx + one-time opening CapEx
-
-Each opened site now carries **two** costs:
-
-| Site | Daily OpEx (recurring) | Opening CapEx (one-time) |
-|---|---|---|
-| Locker | $f^{\text{op}}_j$ = `F_LOCKER` = 150 BRL/day | $o_j$ = `OPEN_LOCKER` = 20 000 BRL |
-| Small hub | $F^{\text{op}}_h$ = `F_HUB` = 2 000 BRL/day | $O_h$ = `OPEN_HUB` = 150 000 BRL |
-
-The objective is expressed **per day**, so the one-time CapEx is **amortised** over a
-horizon $T$ = `AMORT_DAYS` (≈2 years = 730 days) and added as a daily-equivalent charge:
-
-$$
-\sum_{j}\Big(f^{\text{op}}_j + \tfrac{o_j}{T}\Big)y_j
-\;+\;
-\sum_{h}\Big(F^{\text{op}}_h + \tfrac{O_h}{T}\Big)v_h
-$$
-
-Opening a small hub is *way over* to a locker (≈13× the daily cost and
-≈7.5× the CapEx). The full one-time CapEx of the chosen solution is reported separately.
-
-### Routing cost — BHH double-count fix (lockers were clustering at the periphery)
-
-The BHH approximation $c_{ij}=\rho\,l_{ij}\sqrt{A_j\,\eta_i}$ is **already a total tour
-cost** for the zone, because $\sqrt{A_j\,\eta_i}\approx\sqrt{n_i}$ (number of parcels in
-the cell). Multiplying it **again** by $\omega_i$ in the objective double-counts demand:
-the penalty to serve a zone scales as $\omega_i^{1.5}$ while the capture reward
-$\text{COST\_UNCAPTURED}\cdot\omega_i$ is only linear in $\omega_i$. Dense central zones
-then look "too expensive", so the optimiser parked the lockers in low-density cells at the
-city edge (observed: all lockers at the northern extremity, market share *dropping* as $P$
-grew). **Fix:** weight the routing term by the captured share only,
-$\sum_{ij} c_{ij}\,x_{ij}$ (no extra $\omega_i$ — flag `ROUTING_WEIGHT_BY_DEMAND=False`).
-
-### Uncaptured-demand weight $L$ (step 1)
-
-Even with the routing fixed, the $P$ lockers stay a bit clustered. To push them to
-cover more distinct demand we add a weight $L$ on the uncaptured-demand term:
-
-$$
-\dots + L \cdot \text{COST\_UNCAPTURED} \cdot \sum_i \omega_i Z_i
-$$
-
-In code: `L` (env `MNL_L`, default `1`) multiplies the existing per-parcel penalty
-`COST_UNCAPTURED` (= 20). Raising $L$ makes lost demand more important, so the optimiser
-spreads the lockers to capture more zones instead of clustering. The dashboard exposes
-this as the variant **"with cost on lost market share"** ($L=3$) next to the $L=1$ one.
-
-### Single external big hub
-
-Exactly **one** big hub, placed arbitrarily outside the demand bounding box (north,
-centred E–W). Its inbound flux is fixed at $1.5\times$ total demand, so the big-hub
-capacity constraint (BCAP) never binds — only the small hubs and lockers are optimised.
-Small-hub throughput `CAP_HUB` = 3 000 parcels/day (coherent micro-depot).
-
----
 
 ## Results
 
@@ -230,13 +171,13 @@ first of all we had an issue, we counted twice the routing cost, so basically th
 
 We can see that lockers cover more demande (around 17% of total demand) but we can see that they are still a bit clustered.
 
-
-
 ### Step 1
 
 ### Brief
 - [x] add costs of lost market share
 - [x] no capacity for lockers
+- [x] fix the capture radius (too restricted vs the MILP)
+- [x] one hub should cover several lockers (real 2nd echelon)
 
 
 We have to add a cost of lossing a market share so it gives it more weight and less for the routing price so we couldn't see anymore clusters of lockers
@@ -251,6 +192,104 @@ $$
 $$
 
 given L is a weight to give more importance to the market share
+
+With L the lockers do spread on the demand (market share goes from ~19% to ~22% at P=7).
+But L saturates very fast : L=2, 5 and 10 give exactly the **same** solution, so above
+L≈2 it's the number of lockers P that limits, not the weight.
+
+**Capture radius.** If we compare with the exact MILP, the MILP captures almost every zone
+(~79%) because its outside option is tiny, while our MNL was way too restricted (~22%). So
+we widened the locker attractiveness (`A_HUFF` 5 → 12) to get a coherent middle, and we
+lowered the routing price (`COST_PER_KM` 0.7 → 0.3) so it stays a small secondary cost. Now
+the lockers are more or less at the same place as the MILP but we capture ~36% of the demand.
+
+![Map S3](../img/LR-s3.png)
+
+**Too many hubs.** With the hubs free the solver opened **one hub per locker** (7 hubs).
+Be careful — the hubs are **not** free : each open hub costs `F_HUB` + the amortised
+`OPEN_HUB` ≈ 2 205 BRL/day, so 7 hubs already cost 15 435/day. The real culprit was the
+**link** hub→locker :
+
+- a locker could only be served by the hub of its **own** G3 cell — the old constraint
+  $y_j \le v_{h(j)}$, a fixed geographic nesting where $h(j)$ is the G3 cell that contains
+  locker $j$ — and
+- that link had **no distance cost**.
+
+So to keep the 7 lockers on their best capture spots (which happen to fall in 7 different G3
+cells) the solver was *forced* to open the 7 matching hubs : it had no way to share one hub
+between two far lockers. And since capturing demand (the ~135 000/day uncaptured penalty)
+dwarfs the hub cost, it happily paid for 7 hubs.
+
+So we added the real **second echelon** : a locker can now be served by **any** open hub
+(within a reach `MAX_DIST_HUB_KM`), and the van/bike tour from the hub to the locker is
+**priced**.
+
+**How the hubs and distances are set up.** The hub candidates are the **G3 cells** (~25 km²),
+each with a fixed centroid; the lockers are **G2 cells**, also with a fixed centroid. *Before*
+the optimisation we precompute, for every (hub, locker) pair within `MAX_DIST_HUB_KM`, the
+distance $l_{hj}$ = the Euclidean distance (km) between the hub centroid and the locker
+centroid. So the positions and distances are **fixed data** — the solver only *chooses* which
+hubs to open ($v_h$) and who serves whom ($a_{hj}$).
+
+| Symbol | Type | Meaning |
+|---|---|---|
+| $h$ | index | a candidate small hub (a G3 cell) |
+| $j$ | index | a candidate locker (a G2 cell) |
+| $v_h$ | binary $\{0,1\}$ | = 1 if hub $h$ is open |
+| $y_j$ | binary $\{0,1\}$ | = 1 if locker $j$ is open |
+| $a_{hj}$ | continuous $[0,1]$ | share of locker $j$ supplied by hub $h$ (the assignment) — in practice 0 or 1 : "locker $j$ is served by hub $h$" |
+| $l_{hj}$ | constant (km) | distance between hub $h$ and locker $j$ (precomputed) |
+| $\rho_2$ | constant (BRL/km/day) | van/bike tour cost per km per day (`COST_PER_KM_HUB` = 100). The knob. |
+
+Objective term (added) and constraints :
+
+$$
+\dots + \sum_{h}\sum_{j} \rho_2 \, l_{hj} \, a_{hj}
+\qquad
+\sum_{h} a_{hj} = y_j , \quad a_{hj} \le v_h
+$$
+
+- the new term = total daily cost of the hub→locker tours ; only used pairs ($a_{hj}=1$) are paid.
+- $\sum_h a_{hj} = y_j$ : an open locker is served by **exactly one** hub (a closed locker by none).
+- $a_{hj} \le v_h$ : a locker can only be served by an **open** hub.
+- $a_{hj}$ is kept **continuous** (not binary) so it doesn't add integer variables ; minimising the transport pushes it to 0/1 anyway (the nearest open hub).
+
+![Map S4](../img/LR-s4.png)
+
+Now one hub covers several lockers, and the solver arbitrates **"open a hub (~2 205/day)"**
+vs **"deliver from an existing hub ($\rho_2 \cdot l_{hj}$/day)"**. Concretely at $\rho_2=100$,
+the 2-hub solution costs $2\times2\,205 + 7\,859$ tours $= $ **12 269/day**, cheaper than the
+7-hub one (**15 435/day**) **for the same capture** — so it consolidates to **2 hubs** (one
+serves 5 lockers, one serves 2 ; tours 5–21 km). $\rho_2$ is the knob : smaller → fewer hubs /
+longer tours, bigger → more hubs / shorter tours. (one trick : Gurobi keeps the hub count of
+its warm-start, so we feed it a greedy warm-start that already opens the right number of hubs
+for the chosen $\rho_2$.)
+
+### Constants used (default values)
+
+| Constant (code) | Symbol | Value | Meaning |
+|---|---|---|---|
+| `F_LOCKER` | $f_j$ | **150 BRL/day** | locker daily OpEx (rent + electricity + maintenance) |
+| `OPEN_LOCKER` | $o_j$ | **20 000 BRL** | locker one-time opening CapEx (unit + install) |
+| `F_HUB` | $F_h$ | **2 000 BRL/day** | small-hub daily OpEx |
+| `OPEN_HUB` | $O_h$ | **150 000 BRL** | small-hub one-time opening CapEx (fit-out) |
+| `AMORT_DAYS` | $T$ | **730 days** | CapEx amortisation horizon (≈2 yr) → daily charge = CapEx / $T$ |
+| `A_VEHICLE` | $a_j$ | **200 BRL/day** | cost per delivery vehicle (last-mile courier) |
+| `Q_CAPACITY` | $Q$ | **80 parcels/day** | throughput per vehicle |
+| `COST_PER_KM` | $\rho$ | **0.30 BRL/km** | last-mile (locker→zones) BHH routing cost |
+| `COST_PER_KM_HUB` | $\rho_2$ | **100 BRL/km/day** | hub→locker van-tour cost (2nd echelon) |
+| `MAX_DIST_HUB_KM` | — | **30 km** | maximum hub→locker reach |
+| `COST_UNCAPTURED` | $C_0$ | **20 BRL/parcel** | penalty per uncaptured parcel |
+| `L` | $L$ | **1** | weight on the uncaptured-demand term |
+| `A_HUFF` | $A$ | **12** | locker attractiveness (MNL) ; bigger → wider capture radius |
+| `ALPHA` | $\alpha$ | **2** | Huff distance-decay exponent |
+| `BIG_HUB_FLUX_FACTOR` | — | **1.5** | big-hub flux = 1.5 × total demand (so it never binds) |
+| `G2_FACTOR` / `G3_FACTOR` | — | **3 / 5** | grid merge (locker cell ~9 km², hub cell ~25 km²) |
+
+Daily-equivalent CapEx : locker $20\,000/730 \approx$ **27 BRL/day**, hub $150\,000/730 \approx$
+**205 BRL/day**. So an open locker ≈ **177 BRL/day** total, an open hub ≈ **2 205 BRL/day**.
+*(`P_HUB` is left free = `P`, the hub count is cost-driven ; the per-hub flow cap `CAP_HUB`
+is no longer enforced in the flexible model — it would be bilinear — only the big-hub flux caps total throughput.)*
 
 ### Step 2
 
