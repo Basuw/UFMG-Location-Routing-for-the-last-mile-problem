@@ -368,8 +368,6 @@ if is_lrp and cost_params is not None and selected_p is not None:
     _obj = None
     if solve_times is not None:
         _row = solve_times[(solve_times["method"] == selected_method) & (solve_times["P"] == selected_p)]
-        if "L" in _row.columns:            # disambiguate when several L share a method
-            _row = _row[_row["L"] == _L]
         if not _row.empty and "objective" in _row.columns:
             _obj = float(_row["objective"].values[0])
     routing_daily = (
@@ -414,8 +412,6 @@ if solve_times is not None and selected_method and selected_p is not None:
     _st_row = solve_times[
         (solve_times["method"] == selected_method) & (solve_times["P"] == selected_p)
     ]
-    if is_lrp and "L" in _st_row.columns and cost_params is not None:
-        _st_row = _st_row[_st_row["L"] == cost_params.get("L", 1.0)]
     if not _st_row.empty:
         _detail = str(_st_row["detail"].values[0])
         if "gap=" in _detail:
@@ -429,10 +425,10 @@ if solve_times is not None and selected_method and selected_p is not None:
             _obj = _st_row["objective"].values[0]
             if pd.notna(_obj):
                 _info_parts.append(f"**Total daily cost:** {_obj:,.0f} BRL")
-        # Show the model's weight L on uncaptured demand
+        # Show L = cost of one uncaptured parcel (old CSVs: L weight × COST_UNCAPTURED)
         if is_lrp and cost_params is not None:
-            _Lval = cost_params.get("L", 1.0)
-            _info_parts.append(f"**L (uncaptured-demand weight):** {_Lval:g}")
+            _Lval = cost_params.get("L", 20.0) * cost_params.get("COST_UNCAPTURED", 1.0)
+            _info_parts.append(f"**L (uncaptured parcel cost):** {_Lval:g} BRL")
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:

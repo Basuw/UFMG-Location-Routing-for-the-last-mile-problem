@@ -125,7 +125,7 @@ $$
 \sum_{i}\frac{\omega_i}{\sum_{j}u_{ij}y_{j}+1} = \sum_i \omega_i \cdot Z_i
 $$
 
-> Represents the demand that **does not use any locker** (goes to competitors or home delivery). In the UL **minimisation** objective, this term penalises the failure to capture demand. **⚠ Should there be a unit cost multiplier?** (e.g. cost of home delivery per parcel)
+> Represents the demand that **does not use any locker** (goes to competitors or home delivery). In the UL **minimisation** objective, this term penalises the failure to capture demand. **⚠ Should there be a unit cost multiplier?** (e.g. cost of home delivery per parcel) → **yes : we multiply by $L$ = 20 BRL, the cost of one uncaptured parcel** (see Step 1). The term becomes $L\sum_i \omega_i Z_i$.
 
 > **Note** (original line 79): the description "Market share of i captured by j" is incorrect — this term actually represents the share of demand from zone $i$ that is **not captured** by any locker ($= 1 - \text{captured share}$).
 
@@ -137,7 +137,7 @@ $$
 
 2. **$A_j$ in $c_{ij} \approx l_{ij}\sqrt{A_j \eta_i}$**: Voronoi cell area of locker $j$, or Huff model attractiveness? Both use the same letter in different parts of the formulation. -> Its the area
 
-3. **Last term** $\sum_i \frac{\omega_i}{\sum_j u_{ij}y_j + 1}$: should it be multiplied by a unit cost (e.g. home delivery cost per parcel)? Or is it just the uncaptured share with no additional cost?
+3. **Last term** $\sum_i \frac{\omega_i}{\sum_j u_{ij}y_j + 1}$: should it be multiplied by a unit cost (e.g. home delivery cost per parcel)? Or is it just the uncaptured share with no additional cost? -> multiplied by $L$ = 20 BRL (cost of one uncaptured parcel)
 
 4. **$f_j$**: uniform fixed cost for all sites, or real per-site data? -> uniform
 
@@ -191,7 +191,10 @@ $$
 +\sum_{i}\frac{\omega_i}{\sum_{j}u_{ij}y_{j}+1}.L
 $$
 
-given L is a weight to give more importance to the market share
+where $L$ = **20 BRL** is the **cost of one uncaptured parcel** — the money lost when a parcel
+goes to a competitor instead of a locker. It plays two roles at once : it prices the lost
+demand (so the term is in BRL, comparable to the other costs) **and** it gives the model the
+incentive to capture market share. There is a single parameter for this : `L`.
 
 With L the lockers do spread on the demand (market share goes from ~19% to ~22% at P=7).
 But L saturates very fast : L=2, 5 and 10 give exactly the **same** solution, so above
@@ -279,8 +282,7 @@ for the chosen $\rho_2$.)
 | `COST_PER_KM` | $\rho$ | **0.30 BRL/km** | last-mile (locker→zones) BHH routing cost |
 | `COST_PER_KM_HUB` | $\rho_2$ | **100 BRL/km/day** | hub→locker van-tour cost (2nd echelon) |
 | `MAX_DIST_HUB_KM` | — | **30 km** | maximum hub→locker reach |
-| `COST_UNCAPTURED` | $C_0$ | **20 BRL/parcel** | penalty per uncaptured parcel |
-| `L` | $L$ | **1** | weight on the uncaptured-demand term |
+| `L` | $L$ | **20 BRL/parcel** | cost of one uncaptured parcel (prices lost demand + drives capture) |
 | `A_HUFF` | $A$ | **12** | locker attractiveness (MNL) ; bigger → wider capture radius |
 | `ALPHA` | $\alpha$ | **2** | Huff distance-decay exponent |
 | `BIG_HUB_FLUX_FACTOR` | — | **1.5** | big-hub flux = 1.5 × total demand (so it never binds) |

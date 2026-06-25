@@ -864,10 +864,8 @@ _new = pd.DataFrame([{
 }])
 if _log.exists():
     _ex = pd.read_csv(_log)
-    if "L" not in _ex.columns:
-        _ex["L"] = 1.0   # rows logged before L existed used L = 1
-    # Replace the row for this exact (method, P, L) combination
-    _ex = _ex[~((_ex["method"] == METHOD_LABEL) & (_ex["P"] == P) & (_ex["L"] == L))]
+    # Replace the row for this (method, P)
+    _ex = _ex[~((_ex["method"] == METHOD_LABEL) & (_ex["P"] == P))]
     _new = pd.concat([_ex, _new], ignore_index=True)
 _new.to_csv(_log, index=False)
 
