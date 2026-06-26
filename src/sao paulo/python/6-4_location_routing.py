@@ -166,6 +166,10 @@ AMORT_DAYS      = 730.0     # amortisation horizon [days] (≈2 operational year
 OPEN_LOCKER_DAY = OPEN_LOCKER / AMORT_DAYS   # daily-equivalent CapEx, locker
 OPEN_HUB_DAY    = OPEN_HUB    / AMORT_DAYS   # daily-equivalent CapEx, small hub
 Q_CAPACITY      = 80.0    # realistic throughput for urban motorcycle courier [parcels/day]
+# md "step 2" — per-locker capacity: a locker can absorb at most CAP_LOCKER_FRAC
+# of the TOTAL demand (Σ_i ω_i u_ij X_ij ≤ CAP_LOCKER_FRAC·total_demand·y_j).
+# 0 ⇒ no locker capacity (step 1 behaviour).  Sweep e.g. 0.30, 0.40, …
+CAP_LOCKER_FRAC = float(os.environ.get("MNL_CAP_LOCKER_FRAC", 0.0))
 # Single external big hub: its inbound flux is a multiple of total demand.
 # Factor > 1 ⇒ the big hub can always supply the whole city ⇒ BCAP never binds.
 BIG_HUB_FLUX_FACTOR = 1.5
@@ -561,6 +565,22 @@ for j in J:
     else:
         # No close demand zone → force locker closed
         model.addConstr(y[j] == 0, name=f"NODEM_{j}")
+
+# ── (CAPLOCK) Per-locker capacity (md "step 2") ───────────────────────────────
+# A locker absorbs at most CAP_LOCKER_FRAC of total demand.  Binding caps force
+# the captured demand to spread instead of piling up on a few dense lockers.
+if CAP_LOCKER_FRAC > 0:
+    cap_locker = CAP_LOCKER_FRAC * total_demand
+    for j in J:
+        close_I_j = [i for i in I if j in close_J[i]]
+        if close_I_j:
+            model.addConstr(
+                gp.quicksum(w[i] * u[i, j] * X[i, j] for i in close_I_j)
+                <= cap_locker * y[j],
+                name=f"CAPLOCK_{j}",
+            )
+    print(f"  Per-locker capacity = {CAP_LOCKER_FRAC:.0%} of total "
+          f"= {cap_locker:,.0f} parcels/locker")
 
 # ── (LNK) Fleet-facility link ─────────────────────────────────────────────────
 for j in J:

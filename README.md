@@ -179,4 +179,5 @@ Market share grows monotonically with the locker budget `P`, and the hub count s
 
 ## 👤 Author & license
 
-**Bastien Jacquelin** — UFMG Internship 2026. Licensed under the terms in [`LICENSE`](LICENSE).
+**Bastien Jacquelin** — UFMG Internship 2026. Released under a **non-commercial license**
+(MIT-based, commercial use not permitted) — see [`LICENSE`](LICENSE).
