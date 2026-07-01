@@ -150,16 +150,16 @@ $$
 
 
 
-- [ ] split into toher grid with bigger squares -> each cell represent a potential candidate for a small hub. 
+- [x] split into other grid with bigger squares -> each cell represent a potential candidate for a small hub. 
   - Current grid represent the demand for each zone
   - new grid zone, with bigger cells (called G2) -> lockers
   - other grid wither bigger cells than G2, (called G3) -> small hubs
 
-- [ ] Consider big Hubs accross the country, we know (fixed) the capacity of the flow from the hub to the whole big grid 
+- [x] Consider big Hubs accross the country, we know (fixed) the capacity of the flow from the hub to the whole big grid 
 
-- [ ] small Hubs have to be placed during the resolution
+- [x] small Hubs have to be placed during the resolution -> <span style="color: lightgreen;">**Actually, its precomputed before the MNL (iterate throught each small hub withing 15km range)**</span>
 
-- [ ] Routing 
+- [x] Routing 
   - truck goes from hubs to small hubs 
   - then bicycle, cars, ... goes from small hubs to deliver to lockers
 
@@ -167,7 +167,9 @@ $$
 ## Results
 
 As we can see ![Map step1](../img/LR-step1.png)
-first of all we had an issue, we counted twice the routing cost, so basically the distance between lockers and hub is super small. After that fixed we had this : ![Map step2](../img/LR-s2-clustered.png)
+first of all, we had an issue, we counted twice the routing cost, so basically the distance between lockers and hub is super small. 
+
+After that fixed we had this : ![Map step2](../img/LR-s2-clustered.png)
 
 We can see that lockers cover more demande (around 17% of total demand) but we can see that they are still a bit clustered.
 
@@ -208,7 +210,9 @@ the lockers are more or less at the same place as the MILP but we capture ~36% o
 
 ![Map S3](../img/LR-s3.png)
 
-**Too many hubs.** With the hubs free the solver opened **one hub per locker** (7 hubs).
+**Too many hubs:** 
+
+With the hubs free the solver opened **one hub per locker** (7 hubs).
 Be careful — the hubs are **not** free : each open hub costs `F_HUB` + the amortised
 `OPEN_HUB` ≈ 2 205 BRL/day, so 7 hubs already cost 15 435/day. The real culprit was the
 **link** hub→locker :
@@ -220,8 +224,7 @@ Be careful — the hubs are **not** free : each open hub costs `F_HUB` + the amo
 
 So to keep the 7 lockers on their best capture spots (which happen to fall in 7 different G3
 cells) the solver was *forced* to open the 7 matching hubs : it had no way to share one hub
-between two far lockers. And since capturing demand (the ~135 000/day uncaptured penalty)
-dwarfs the hub cost, it happily paid for 7 hubs.
+between two lockers.
 
 So we added the real **second echelon** : a locker can now be served by **any** open hub
 (within a reach `MAX_DIST_HUB_KM`), and the van/bike tour from the hub to the locker is
@@ -295,9 +298,51 @@ is no longer enforced in the flexible model — it would be bilinear — only th
 
 ### Step 2
 
-add capacity
-test for 30% of total demand,
-next 40% , ...
+### Brief
+- [x] add a capacity : the locker network captures at most X % of total demand
+
+We add a **total capacity** on the network — the whole set of lockers can capture at most a
+fraction of the total demand (env `MNL_CAP_TOTAL_FRAC`) :
+
+$$
+\sum_i \omega_i (1 - Z_i) \;\le\; X \cdot \Omega
+\qquad \Omega = \text{total demand}
+$$
+
+($\omega_i(1-Z_i)$ = demand of zone $i$ actually captured, so the sum is the total captured.)
+
+Tested at **X = 30 %** and **40 %** (P = 7) :
+
+| capacity $X$ | market share | what happens |
+|:---:|:---:|---|
+| **30 %** | **29.9 %** | **binds** — the network drops the least-valuable 6.5 %, the lockers **cluster on the densest 30 %** of demand (a different, tighter layout) |
+| **40 %** | **36.5 %** | **above** the natural capture (36.5 %) → **does not bind**, same as no cap |
+
+So the *natural* capture with these costs is ~36.5 % ; a capacity only matters **below** that.
+At 30 % the lockers concentrate on the densest zones — and the MILP even solves **tighter**
+(gap 4.5 % vs ~10 % unconstrained), because fixing the capture target makes the search easier.
+
+**Market-share ↔ cost curve.** Sweeping the capacity (P = 7) gives, per served market share, the
+daily **operational cost** (fixed lockers/hubs + fleet + last-mile routing + hub→locker tours,
+*excluding* the uncaptured penalty) and the **total objective** :
+
+| capacity | market share | hubs | operational cost /day | total objective /day |
+|:---:|:---:|:---:|:---:|:---:|
+| 20 % | 20.0 % | 1 | 16 322 | 186 583 |
+| 25 % | 24.6 % | 1 | 18 174 | 178 629 |
+| 30 % | 29.9 % | 2 | 23 657 | 172 875 |
+| ∞ (natural) | 36.5 % | 2 | 30 394 | 165 594 |
+
+Two readings :
+- **Operational cost rises with market share, with an increasing marginal cost** — the last
+  points are the most expensive to serve (fleet + hub tours grow fastest ; hub tours jump
+  2.4k → 7.9k at the top because the network must reach farther).
+- **The total objective *decreases*** toward the natural 36.5 %, because each captured parcel
+  avoids the $L = 20$ BRL penalty, and that saving outweighs the extra operational cost — which
+  is exactly why the unconstrained model settles at ~36.5 %.
+
+*(Optional lever : a per-locker cap `MNL_CAP_LOCKER_FRAC`, but it only binds below ~6 % — the
+busiest single locker captures 6.5 % of total.)*
 
 
 ### Step 3

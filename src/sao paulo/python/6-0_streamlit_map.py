@@ -64,6 +64,8 @@ RESULT_PATTERNS = {
     "LRP-MNL — 1. routing double-count (clusters)": ("lr_old_results", "lr_old_lockers"),
     "LRP-MNL — 2. coherent costs (7 hubs)":         ("lr_bal_results", "lr_bal_lockers"),
     "LRP-MNL — 3. two-echelon hubs (final)":        ("lr_2ech_results", "lr_2ech_lockers"),
+    "LRP-MNL — capacity 20% of demand":             ("lr_cap20_results", "lr_cap20_lockers"),
+    "LRP-MNL — capacity 30% of demand":             ("lr_cap30_results", "lr_cap30_lockers"),
 }
 
 # Colour per method (used in chart + highlight)
@@ -74,6 +76,8 @@ METHOD_COLOURS = {
     "LRP-MNL — 1. routing double-count (clusters)": "#b5651d",   # brown (clusters at edge)
     "LRP-MNL — 2. coherent costs (7 hubs)":         "#2c3e50",   # dark slate
     "LRP-MNL — 3. two-echelon hubs (final)":        "#16537e",   # deep blue (final)
+    "LRP-MNL — capacity 20% of demand":             "#1abc9c",   # teal (capacity-limited)
+    "LRP-MNL — capacity 30% of demand":             "#27ae60",   # green (capacity-limited)
 }
 
 # ---------------------------------------------------------------------------
@@ -432,7 +436,7 @@ if solve_times is not None and selected_method and selected_p is not None:
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:
-    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)"] if m != selected_method]
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"] if m != selected_method]
     _cur_set = set(open_locker_ids)
     _diff_flags = []
     for _om in _other_methods:
@@ -502,7 +506,7 @@ if solve_times is not None and not solve_times.empty:
     with tab_right:
         st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
-            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)"]
+            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"]
             fig_trend = go.Figure()
             for meth in methods_order:
                 df_m = (
@@ -559,7 +563,7 @@ if solve_times is not None and not solve_times.empty:
     # ── Locker comparison across methods for selected P ───────────────────
     st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
     _locker_rows = []
-    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)"]:
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"]:
         _lpath = lockers_path(_m, selected_p)
         if _lpath.exists():
             _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())

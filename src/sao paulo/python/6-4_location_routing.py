@@ -166,9 +166,12 @@ AMORT_DAYS      = 730.0     # amortisation horizon [days] (≈2 operational year
 OPEN_LOCKER_DAY = OPEN_LOCKER / AMORT_DAYS   # daily-equivalent CapEx, locker
 OPEN_HUB_DAY    = OPEN_HUB    / AMORT_DAYS   # daily-equivalent CapEx, small hub
 Q_CAPACITY      = 80.0    # realistic throughput for urban motorcycle courier [parcels/day]
-# md "step 2" — per-locker capacity: a locker can absorb at most CAP_LOCKER_FRAC
-# of the TOTAL demand (Σ_i ω_i u_ij X_ij ≤ CAP_LOCKER_FRAC·total_demand·y_j).
-# 0 ⇒ no locker capacity (step 1 behaviour).  Sweep e.g. 0.30, 0.40, …
+# md "step 2" — capacity of the locker network.
+#  CAP_TOTAL_FRAC : the WHOLE network captures at most this fraction of total demand
+#                   (Σ_i ω_i (1-Z_i) ≤ CAP_TOTAL_FRAC · total_demand).  Sweep 0.30, 0.40.
+#  CAP_LOCKER_FRAC: optional per-locker cap (Σ_i ω_i u_ij X_ij ≤ frac·total·y_j).
+#  0 ⇒ off (step 1 behaviour).
+CAP_TOTAL_FRAC  = float(os.environ.get("MNL_CAP_TOTAL_FRAC",  0.0))
 CAP_LOCKER_FRAC = float(os.environ.get("MNL_CAP_LOCKER_FRAC", 0.0))
 # Single external big hub: its inbound flux is a multiple of total demand.
 # Factor > 1 ⇒ the big hub can always supply the whole city ⇒ BCAP never binds.
@@ -606,6 +609,16 @@ model.addConstr(
     gp.quicksum(w[i] * (1 - Z[i]) for i in I) <= CAP_BIG_HUB,
     name="BCAP",
 )
+
+# ── (CAPTOT) Total locker-network capacity (md "step 2") ──────────────────────
+# The whole locker network can capture at most CAP_TOTAL_FRAC of total demand.
+if CAP_TOTAL_FRAC > 0:
+    model.addConstr(
+        gp.quicksum(w[i] * (1 - Z[i]) for i in I) <= CAP_TOTAL_FRAC * total_demand,
+        name="CAPTOT",
+    )
+    print(f"  Total network capacity = {CAP_TOTAL_FRAC:.0%} of demand "
+          f"= {CAP_TOTAL_FRAC * total_demand:,.0f} parcels")
 
 # ── (BDG) Budget constraints ──────────────────────────────────────────────────
 model.addConstr(gp.quicksum(y[j] for j in J) == P,       name="budget_lockers")
