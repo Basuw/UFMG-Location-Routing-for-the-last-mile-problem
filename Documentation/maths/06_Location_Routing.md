@@ -262,7 +262,7 @@ $$
 
 ![Map S4](../img/LR-s4.png)
 
-Now one hub covers several lockers, and the solver arbitrates **"open a hub (~2 205/day)"**
+Now, one hub covers several lockers, and the solver arbitrates **"open a hub (~2 205/day)"**
 vs **"deliver from an existing hub ($\rho_2 \cdot l_{hj}$/day)"**. Concretely at $\rho_2=100$,
 the 2-hub solution costs $2\times2\,205 + 7\,859$ tours $= $ **12 269/day**, cheaper than the
 7-hub one (**15 435/day**) **for the same capture** — so it consolidates to **2 hubs** (one
@@ -298,51 +298,9 @@ is no longer enforced in the flexible model — it would be bilinear — only th
 
 ### Step 2
 
-### Brief
-- [x] add a capacity : the locker network captures at most X % of total demand
-
-We add a **total capacity** on the network — the whole set of lockers can capture at most a
-fraction of the total demand (env `MNL_CAP_TOTAL_FRAC`) :
-
-$$
-\sum_i \omega_i (1 - Z_i) \;\le\; X \cdot \Omega
-\qquad \Omega = \text{total demand}
-$$
-
-($\omega_i(1-Z_i)$ = demand of zone $i$ actually captured, so the sum is the total captured.)
-
-Tested at **X = 30 %** and **40 %** (P = 7) :
-
-| capacity $X$ | market share | what happens |
-|:---:|:---:|---|
-| **30 %** | **29.9 %** | **binds** — the network drops the least-valuable 6.5 %, the lockers **cluster on the densest 30 %** of demand (a different, tighter layout) |
-| **40 %** | **36.5 %** | **above** the natural capture (36.5 %) → **does not bind**, same as no cap |
-
-So the *natural* capture with these costs is ~36.5 % ; a capacity only matters **below** that.
-At 30 % the lockers concentrate on the densest zones — and the MILP even solves **tighter**
-(gap 4.5 % vs ~10 % unconstrained), because fixing the capture target makes the search easier.
-
-**Market-share ↔ cost curve.** Sweeping the capacity (P = 7) gives, per served market share, the
-daily **operational cost** (fixed lockers/hubs + fleet + last-mile routing + hub→locker tours,
-*excluding* the uncaptured penalty) and the **total objective** :
-
-| capacity | market share | hubs | operational cost /day | total objective /day |
-|:---:|:---:|:---:|:---:|:---:|
-| 20 % | 20.0 % | 1 | 16 322 | 186 583 |
-| 25 % | 24.6 % | 1 | 18 174 | 178 629 |
-| 30 % | 29.9 % | 2 | 23 657 | 172 875 |
-| ∞ (natural) | 36.5 % | 2 | 30 394 | 165 594 |
-
-Two readings :
-- **Operational cost rises with market share, with an increasing marginal cost** — the last
-  points are the most expensive to serve (fleet + hub tours grow fastest ; hub tours jump
-  2.4k → 7.9k at the top because the network must reach farther).
-- **The total objective *decreases*** toward the natural 36.5 %, because each captured parcel
-  avoids the $L = 20$ BRL penalty, and that saving outweighs the extra operational cost — which
-  is exactly why the unconstrained model settles at ~36.5 %.
-
-*(Optional lever : a per-locker cap `MNL_CAP_LOCKER_FRAC`, but it only binds below ~6 % — the
-busiest single locker captures 6.5 % of total.)*
+add capacity
+test for 30% of total demand,
+next 40% , ...
 
 
 ### Step 3
