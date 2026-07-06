@@ -173,6 +173,14 @@ Q_CAPACITY      = 80.0    # realistic throughput for urban motorcycle courier [p
 #  0 ⇒ off (step 1 behaviour).
 CAP_TOTAL_FRAC  = float(os.environ.get("MNL_CAP_TOTAL_FRAC",  0.0))
 CAP_LOCKER_FRAC = float(os.environ.get("MNL_CAP_LOCKER_FRAC", 0.0))
+
+# md "step 3" — CONGESTION on lockers.  A locker whose flow f approaches its
+# capacity τ delays customers (queue at the parcel locker).  Soft convex cost
+#     φ(f) = c · (f/τ) / (1 - f/τ)            (blows up as utilisation → 1)
+# added per locker ; customers complain around 70–80 % utilisation.  c small.
+# 0 ⇒ off.  The convex φ is linearised piecewise (Gurobi PWL, no binaries).
+CONGESTION_C = float(os.environ.get("MNL_CONGESTION_C", 0.0))     # c [BRL], small
+LOCKER_CAP   = float(os.environ.get("MNL_LOCKER_CAP",   900.0))   # τ [parcels/day]
 # Single external big hub: its inbound flux is a multiple of total demand.
 # Factor > 1 ⇒ the big hub can always supply the whole city ⇒ BCAP never binds.
 BIG_HUB_FLUX_FACTOR = 1.5
@@ -585,6 +593,29 @@ if CAP_LOCKER_FRAC > 0:
     print(f"  Per-locker capacity = {CAP_LOCKER_FRAC:.0%} of total "
           f"= {cap_locker:,.0f} parcels/locker")
 
+# ── (CONG) Congestion cost on lockers (md "step 3") ───────────────────────────
+# φ(f) = c·(f/τ)/(1-f/τ) is convex ; in a minimisation it is exactly its own upper
+# envelope of TANGENT lines, so we model it with a few linear cuts (NO binaries,
+# unlike a PWL general constraint) : cong_j ≥ slope_k·flow_j + intercept_k.
+#   tangent at f_k = ρ_k·τ :  slope = c/((1-ρ_k)²·τ),  intercept = -c·ρ_k²/(1-ρ_k)².
+cong = None
+if CONGESTION_C > 0:
+    _rhos = [0.20, 0.40, 0.55, 0.68, 0.78, 0.88]               # tangent utilisations
+    flow = model.addVars(J, lb=0.0, name="flow")
+    cong = model.addVars(J, lb=0.0, obj=1.0, name="cong")       # obj=1 → added to objective
+    for j in J:
+        close_I_j = [i for i in I if j in close_J[i]]
+        model.addConstr(
+            flow[j] == gp.quicksum(w[i] * u[i, j] * X[i, j] for i in close_I_j),
+            name=f"FLOW_{j}",
+        )
+        for r in _rhos:
+            slope = CONGESTION_C / ((1.0 - r) ** 2 * LOCKER_CAP)
+            intercept = -CONGESTION_C * r ** 2 / (1.0 - r) ** 2
+            model.addConstr(cong[j] >= slope * flow[j] + intercept, name=f"CONG_{j}_{int(r*100)}")
+    print(f"  Congestion ON : c={CONGESTION_C:g}, τ={LOCKER_CAP:g} parcels/locker "
+          f"(complaint zone 70–80 % ≈ {0.7*LOCKER_CAP:.0f}–{0.8*LOCKER_CAP:.0f} parcels)")
+
 # ── (LNK) Fleet-facility link ─────────────────────────────────────────────────
 for j in J:
     model.addConstr(q[j] <= M_big * y[j], name=f"LNK_{j}")
@@ -789,6 +820,11 @@ print(f"Opening CapEx (one-time) : {capex_total:,.0f} BRL "
       f"({len(open_lockers)}×{OPEN_LOCKER:,.0f} + {len(open_hubs)}×{OPEN_HUB:,.0f})")
 print(f"Fixed daily : {opex_daily:,.0f} OpEx + {open_daily:,.0f} amortised CapEx "
       f"= {opex_daily + open_daily:,.0f} BRL/day")
+if cong is not None:
+    _cong_total = sum(cong[j].X for j in open_lockers)
+    _maxutil = max((flow[j].X / LOCKER_CAP for j in open_lockers), default=0.0)
+    print(f"Congestion  : {_cong_total:,.0f} BRL/day  "
+          f"(busiest locker at {_maxutil:.0%} of τ={LOCKER_CAP:g})")
 print("=" * 60)
 
 # ── Market share (MNL with u0 = 1) ────────────────────────────────────────────

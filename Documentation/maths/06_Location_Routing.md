@@ -347,22 +347,41 @@ busiest single locker captures 6.5 % of total.)*
 
 ### Step 3
 
-add congestion
+### Brief
+- [x] add a congestion cost on the lockers
+
+A locker whose flow $f$ approaches its capacity $\tau$ delays customers (queue, full
+compartments). We add a **soft congestion cost** per locker :
 
 $$
-\phi(f)=
-\frac {cf}{\tau-f}
-$$
-$$
-c \rarr \text{prox cost (very small)}
-$$
-$$
-f \rarr \text{flow}
-$$
-$$
-\tau \rarr \text{capacity}
+\phi(f)= \frac{c\,f}{\tau-f}
+\qquad
+c \rarr \text{prox cost (small)},\;\; f \rarr \text{flow},\;\; \tau \rarr \text{capacity}
 $$
 
-clients complain when congestion is btw 70% to 80%
+Clients complain when the utilisation $f/\tau$ is between **70 % and 80 %** — and indeed
+$\phi$ blows up as $f\to\tau$ (it roughly doubles from 70 % to 80 %).
+
+**How it's implemented.** $\phi$ is **convex**, so in a minimisation it equals the upper
+envelope of its **tangent lines** — we add a few linear cuts
+$\text{cong}_j \ge \text{slope}_k\,f_j + \text{intercept}_k$ (env `MNL_CONGESTION_C` = $c$,
+`MNL_LOCKER_CAP` = $\tau$). This keeps the model a pure MILP with **no extra binaries**
+(a Gurobi `PWL` general-constraint added thousands of SOS2 binaries → 2 h / 25 % gap ; the
+tangent cuts solve in ~15 min).
+
+**What we found — congestion does *not* reshape the P = 7 solution :**
+
+| | congestion paid /day | layout | busiest locker | market share |
+|---|:---:|:---:|:---:|:---:|
+| baseline ($c=0$) | 0 | — | 77 % | 36.5 % |
+| $c=100$ (small) | 1 191 | **identical** | 77 % | 36.5 % |
+| $c=3000$ (large) | 35 736 | **identical (proven optimal)** | 77 % | 36.5 % |
+
+The busiest locker sits on the **densest** demand ; to lower its peak we'd have to move it
+(losing capture) or **split** it into two lockers on the same area (leaving fewer lockers
+elsewhere → big coverage loss). At P = 7 the **capture value always dominates** the congestion
+cost, so it is merely *accounted* (τ = 900 → the busiest is at 77 %, in the complaint zone),
+never *avoided*. To actually cut the peak, add **more lockers** (higher $P$) or a **hard cap**
+(Step 2) — a soft cost is not enough.
 
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
