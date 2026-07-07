@@ -66,6 +66,7 @@ RESULT_PATTERNS = {
     "LRP-MNL — 3. two-echelon hubs (final)":        ("lr_2ech_results", "lr_2ech_lockers"),
     "LRP-MNL — capacity 20% of demand":             ("lr_cap20_results", "lr_cap20_lockers"),
     "LRP-MNL — capacity 30% of demand":             ("lr_cap30_results", "lr_cap30_lockers"),
+    "LRP-MNL — capacity 40% of demand":             ("lr_cap40_results", "lr_cap40_lockers"),
 }
 
 # Colour per method (used in chart + highlight)
@@ -78,6 +79,7 @@ METHOD_COLOURS = {
     "LRP-MNL — 3. two-echelon hubs (final)":        "#16537e",   # deep blue (final)
     "LRP-MNL — capacity 20% of demand":             "#1abc9c",   # teal (capacity-limited)
     "LRP-MNL — capacity 30% of demand":             "#27ae60",   # green (capacity-limited)
+    "LRP-MNL — capacity 40% of demand":             "#2ecc71",   # light green (non-binding)
 }
 
 # ---------------------------------------------------------------------------
@@ -226,6 +228,50 @@ def market_share_to_colour(pct: float, max_pct: float) -> str:
     return f"#{r:02x}{g:02x}28"
 
 
+def compute_locker_flows(lockers_ll, zones, a_huff=12.0, alpha=2.0,
+                         min_d=0.15, max_d=12.0, lat_km=111.0):
+    """Recompute per-locker captured flow via the MNL (no re-solve).
+
+    lockers_ll : list of (id, lat, lon) for the open lockers.
+    zones      : DataFrame with columns lat, lon, demand.
+    Returns {locker_id: captured parcels/day}.
+    """
+    import math
+    if not lockers_ll or zones.empty:
+        return {}
+    lat_mean = float(zones["lat"].mean())
+    lon_km = lat_km * math.cos(math.radians(lat_mean))
+    zlat = zones["lat"].to_numpy(); zlon = zones["lon"].to_numpy()
+    w = zones["demand"].to_numpy()
+    flows = {lid: 0.0 for lid, _, _ in lockers_ll}
+    lat_arr = np.array([la for _, la, _ in lockers_ll])
+    lon_arr = np.array([lo for _, _, lo in lockers_ll])
+    ids = [lid for lid, _, _ in lockers_ll]
+    for k in range(len(zlat)):
+        dlat = (zlat[k] - lat_arr) * lat_km
+        dlon = (zlon[k] - lon_arr) * lon_km
+        d = np.sqrt(dlat * dlat + dlon * dlon)
+        d = np.clip(d, min_d, None)
+        u = np.where(d <= max_d, a_huff / d ** alpha, 0.0)
+        S = u.sum()
+        if S > 0:
+            share = u / (S + 1.0)          # MNL, u0 = 1
+            for m, lid in enumerate(ids):
+                flows[lid] += w[k] * share[m]
+    return flows
+
+
+def utilisation_colour(util: float) -> str:
+    """Folium icon colour by utilisation f/τ (complaint zone 70–80%)."""
+    if util >= 0.80:
+        return "red"
+    if util >= 0.70:
+        return "orange"
+    if util >= 0.50:
+        return "beige"
+    return "green"
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -266,6 +312,10 @@ show_g3   = st.sidebar.checkbox("G3 small-hub grid (~25 km²)", value=False)
 st.sidebar.markdown("**Location routing** *(LRP-MNL)*")
 show_routing  = st.sidebar.checkbox("Show routing network", value=True)
 show_big_hub  = st.sidebar.checkbox("Show external big hub", value=True)
+
+st.sidebar.markdown("**Congestion** *(step 3)*")
+show_util   = st.sidebar.checkbox("Show locker utilisation (f/τ)", value=False)
+locker_tau  = st.sidebar.slider("Locker capacity τ (parcels/day)", 300, 2000, 900, step=50)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Top-N zones in table**")
@@ -436,7 +486,7 @@ if solve_times is not None and selected_method and selected_p is not None:
 
 # Compare lockers with the other two methods
 if open_locker_ids and selected_p is not None:
-    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"] if m != selected_method]
+    _other_methods = [m for m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand", "LRP-MNL — capacity 40% of demand"] if m != selected_method]
     _cur_set = set(open_locker_ids)
     _diff_flags = []
     for _om in _other_methods:
@@ -506,7 +556,7 @@ if solve_times is not None and not solve_times.empty:
     with tab_right:
         st.markdown("**Runtime vs P — all methods** *(log scale)*")
         if "solve_time_s" in st_all.columns:
-            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"]
+            methods_order = ["Greedy", "OA (Outer Approx.)", "Exact MILP", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand", "LRP-MNL — capacity 40% of demand"]
             fig_trend = go.Figure()
             for meth in methods_order:
                 df_m = (
@@ -563,7 +613,7 @@ if solve_times is not None and not solve_times.empty:
     # ── Locker comparison across methods for selected P ───────────────────
     st.markdown(f"**Locker sets for P = {selected_p}** — which lockers each method opens")
     _locker_rows = []
-    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand"]:
+    for _m in ["Exact MILP", "Greedy", "OA (Outer Approx.)", "LRP-MNL — 1. routing double-count (clusters)", "LRP-MNL — 2. coherent costs (7 hubs)", "LRP-MNL — 3. two-echelon hubs (final)", "LRP-MNL — capacity 20% of demand", "LRP-MNL — capacity 30% of demand", "LRP-MNL — capacity 40% of demand"]:
         _lpath = lockers_path(_m, selected_p)
         if _lpath.exists():
             _ids = sorted(pd.read_csv(_lpath)["candidate_id"].tolist())
@@ -715,18 +765,42 @@ with map_col:
         open_ids_set = set()
         st.caption("⚠️ Lockers file not found.")
 
-    # ── Open lockers: green markers ───────────────────────────────────────
+    # ── Locker utilisation f/τ (step 3) — recomputed via the MNL ─────────
+    _locker_flows = {}
+    if show_util and is_lrp and show_zones and not open_candidates.empty:
+        _lockers_ll = [
+            (r["candidate_id"], r["Latitude"], r["Longitude"])
+            for _, r in open_candidates.iterrows()
+        ]
+        _locker_flows = compute_locker_flows(
+            _lockers_ll, results_mapped[["lat", "lon", "demand"]].dropna()
+        )
+
+    # ── Open lockers: green markers (coloured by utilisation if enabled) ──
     for _, cand in open_candidates.iterrows():
+        _cid = cand["candidate_id"]
+        if show_util and _cid in _locker_flows:
+            _flow = _locker_flows[_cid]
+            _util = _flow / locker_tau
+            _icolor = utilisation_colour(_util)
+            _extra = (f"<br><b>Flow:</b> {_flow:,.0f} parcels/day"
+                      f"<br><b>Utilisation:</b> {_util:.0%} of τ={locker_tau}"
+                      + ("  ⚠️ complaint zone" if 0.70 <= _util < 0.80
+                         else "  🔴 overloaded" if _util >= 0.80 else ""))
+        else:
+            _icolor, _extra = "green", ""
         folium.Marker(
             location=[cand["Latitude"], cand["Longitude"]],
-            icon=folium.Icon(color="green", icon="archive", prefix="fa"),
+            icon=folium.Icon(color=_icolor, icon="archive", prefix="fa"),
             popup=folium.Popup(
-                f"<b>✅ {cand['candidate_id']}</b><br>"
+                f"<b>✅ {_cid}</b><br>"
                 f"Capacity: {cand['capacity']}<br>"
-                f"Lat: {cand['Latitude']:.4f}, Lon: {cand['Longitude']:.4f}",
-                max_width=220,
+                f"Lat: {cand['Latitude']:.4f}, Lon: {cand['Longitude']:.4f}"
+                + _extra,
+                max_width=240,
             ),
-            tooltip=str(cand["candidate_id"]),
+            tooltip=(f"{_cid} — {_locker_flows[_cid]/locker_tau:.0%}"
+                     if show_util and _cid in _locker_flows else str(_cid)),
         ).add_to(m)
 
     # ── LRP-MNL: small hubs (orange markers) ─────────────────────────────
@@ -823,6 +897,12 @@ with map_col:
             _parts.append("<span style='color:#d35400'>▢</span> G3 hub")
         _legend_grids = "<br><b style='color:#111'>Grids</b><br>" + "<br>".join(_parts)
     _legend_lrp += _legend_grids
+    if show_util and is_lrp:
+        _legend_lrp += (
+            "<br><b style='color:#111'>Locker utilisation f/τ</b><br>"
+            "🟢 &lt;50%&nbsp;&nbsp;🟤 50–70%<br>"
+            "🟠 70–80% (complaint)<br>🔴 &gt;80% (overloaded)"
+        )
     m.get_root().html.add_child(folium.Element(f"""
     <div style="position:fixed; bottom:30px; left:30px; z-index:1000;
                 background:white; color:#333; padding:10px 14px; border-radius:8px;

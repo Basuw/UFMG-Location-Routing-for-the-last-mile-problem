@@ -296,6 +296,24 @@ Daily-equivalent CapEx : locker $20\,000/730 \approx$ **27 BRL/day**, hub $150\,
 *(`P_HUB` is left free = `P`, the hub count is cost-driven ; the per-hub flow cap `CAP_HUB`
 is no longer enforced in the flexible model — it would be bilinear — only the big-hub flux caps total throughput.)*
 
+### Market share vs number of lockers $P$
+
+Running the final model for several locker budgets $P$ (the hub count stays cost-driven) :
+
+| $P$ (lockers) | small hubs | market share |
+|:---:|:---:|:---:|
+| 1 | 1 | 8.0 % |
+| 3 | 1 | 19.2 % |
+| 5 | 2 | 28.6 % |
+| 7 | 2 | 36.5 % |
+| 11 | 3 | 47.4 % |
+| 15 | 3 | 55.4 % |
+
+Market share grows **monotonically** with $P$ but with **diminishing returns** (each extra
+locker captures a bit less, since the best spots are taken first). More lockers also open more
+hubs when spreading pays off. *(For $P = 11$ and $15$ the MILP is hard — those two rows are the
+best feasible / heuristic solution, not proven optimal.)*
+
 ### Step 2
 
 ### Brief
@@ -311,12 +329,13 @@ $$
 
 ($\omega_i(1-Z_i)$ = demand of zone $i$ actually captured, so the sum is the total captured.)
 
-Tested at **X = 30 %** and **40 %** (P = 7) :
+Tested at **X = 20 %**, **30 %** and **40 %** (P = 7) :
 
 | capacity $X$ | market share | what happens |
 |:---:|:---:|---|
-| **30 %** | **29.9 %** | **binds** — the network drops the least-valuable 6.5 %, the lockers **cluster on the densest 30 %** of demand (a different, tighter layout) |
-| **40 %** | **36.5 %** | **above** the natural capture (36.5 %) → **does not bind**, same as no cap |
+| **20 %** | **19.9 %** | ![Map S4](../img/LR-s5.png) What we can see, we open 7 lockers but we only want 20% of the market share, for this reason all the lockers are clustered next a small hub to lower as much its possible the routing cost. To see it effectively we should try it with 5 or 3 lockers.|
+| **30 %** | **29.9 %** |  **binds** — we only ask for 30% of the market share, so the network keeps the densest zones and drops the least-valuable ~6.5%. The 7 lockers still concentrate on the dense core (a bit more spread than at 20%), served by **2 small hubs**. The MILP even solves **tighter** (gap 4.5% vs ~10% unconstrained) because fixing the capture target eases the search. Same idea : to really see the layout change, try it with 3 or 5 lockers. |
+| **40 %** | **36.5 %** | ![Map cap40](../img/LR-s7.png) **does not bind** — 40% is above the natural capture (36.5%), so we get **exactly** the unconstrained final solution (same 7 lockers, 2 hubs, 36.5%). A capacity only changes anything **below** the natural capture. |
 
 So the *natural* capture with these costs is ~36.5 % ; a capacity only matters **below** that.
 At 30 % the lockers concentrate on the densest zones — and the MILP even solves **tighter**
@@ -383,5 +402,35 @@ elsewhere → big coverage loss). At P = 7 the **capture value always dominates*
 cost, so it is merely *accounted* (τ = 900 → the busiest is at 77 %, in the complaint zone),
 never *avoided*. To actually cut the peak, add **more lockers** (higher $P$) or a **hard cap**
 (Step 2) — a soft cost is not enough.
+
+
+
+We can see that with a 600 parcels/day by locker that all lockers are above 70% of congestion which is in complaint zone of the customers. Moreover 600 is a lot for a locker (usually for a locker we are between 50 and 120). 
+
+![Map cap30](../img/LR-s6-11lockers-congestion.png)
+
+### Hypotheses — how to make the model realistic
+
+The root cause : in the model **one "locker" captures hundreds of parcels/day** (444–691),
+while a real locker unit only handles ~50–120. So a model "locker" is in fact a **station that
+needs several cabinets**. A few ways to fix it :
+
+- **H1 — modular capacity (recommended).** Replace the open/closed $y_j$ by an **integer number
+  of cabinets** $n_j$ at each site, with $\text{flow}_j \le \tau_{\text{unit}}\cdot n_j$
+  ($\tau_{\text{unit}}\approx 80$) and a cost $\propto n_j$. The model then **sizes** each site :
+  utilisation is bounded by construction (never > 100 %), and a busy site simply gets more
+  cabinets. With our flows that is ~6–9 cabinets on the busiest sites (≈ 50 cabinets total) — a
+  realistic deployment, and it replaces the (inert) soft congestion of Step 3.
+- **H2 — recalibrate the capture radius.** `A_HUFF` = 12 was chosen to match the wide MILP radius,
+  but it makes each locker over-capture. Lowering it (→ ~5) gives realistic per-unit flows
+  (~80–150) at the price of a lower market share (~10–20 %, which is itself more realistic for a
+  young locker network).
+- **H3 — more locker sites** ($P\uparrow$) to spread the load — but this only picks $P$, it does
+  not fix the structural scale.
+- **H4 — hard per-locker cap** (`CAPLOCK`) that forces $\text{flow}_j \le \tau$ — realistic if a
+  site truly cannot exceed $\tau$, but the excess demand is then **lost** (uncaptured).
+
+Most likely the right model is **H1 + H2** : size the cabinets *and* use a realistic capture
+radius, so both the flows and the utilisation land in a credible range.
 
 *Reference document — UFMG Internship 2026 — Bastien Jacquelin*
